@@ -1,5 +1,9 @@
 import asyncio
+import glob
 import logging
+import os
+import signal
+import subprocess
 
 from playwright.async_api import async_playwright, BrowserContext, Page
 
@@ -13,6 +17,33 @@ _context: BrowserContext | None = None
 _main_page: Page | None = None
 
 
+def _cleanup_stale_browser() -> None:
+    """Kill orphaned Chromium processes and remove all lock files."""
+    profile = str(settings.browser_data_dir)
+
+    # Kill any Chromium still using this profile
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", profile], capture_output=True, text=True
+        )
+        for pid_str in result.stdout.strip().split("\n"):
+            if pid_str.strip():
+                pid = int(pid_str.strip())
+                if pid != os.getpid():
+                    os.kill(pid, signal.SIGTERM)
+                    logger.info("Killed stale Chromium process %d", pid)
+    except Exception:
+        pass
+
+    # Remove all Singleton* lock files
+    for lock in glob.glob(str(settings.browser_data_dir / "Singleton*")):
+        try:
+            os.unlink(lock)
+            logger.info("Removed stale lock: %s", os.path.basename(lock))
+        except Exception:
+            pass
+
+
 async def get_browser_context() -> BrowserContext:
     global _pw, _context
 
@@ -21,11 +52,8 @@ async def get_browser_context() -> BrowserContext:
 
     settings.browser_data_dir.mkdir(parents=True, exist_ok=True)
 
-    # Remove stale lock file from unclean shutdown
-    lock_file = settings.browser_data_dir / "SingletonLock"
-    if lock_file.exists():
-        lock_file.unlink()
-        logger.info("Removed stale SingletonLock")
+    # Kill any lingering Chromium using this profile and remove lock files
+    _cleanup_stale_browser()
 
     _pw = await async_playwright().start()
     _context = await _pw.chromium.launch_persistent_context(
