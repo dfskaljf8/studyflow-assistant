@@ -2,9 +2,7 @@ import asyncio
 import logging
 from pathlib import Path
 
-from playwright.async_api import Page
-
-from browser.session import new_page
+from browser.session import new_page, safe_goto
 from config.settings import settings
 from classroom.scanner import Assignment
 

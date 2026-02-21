@@ -4,7 +4,7 @@ import random
 
 from playwright.async_api import Page
 
-from browser.session import new_page
+from browser.session import get_page, safe_goto
 from classroom.scanner import Assignment
 
 logger = logging.getLogger(__name__)
@@ -15,12 +15,13 @@ async def paste_draft(assignment: Assignment, draft_text: str) -> bool:
         logger.warning("No URL for: %s", assignment.title)
         return False
 
-    page = await new_page()
+    page = await get_page()
 
     try:
-        await page.goto(assignment.assignment_url, wait_until="domcontentloaded", timeout=60000)
-        await asyncio.sleep(random.uniform(2, 4))
+        await safe_goto(page, assignment.assignment_url, wait_selector='[role="main"]')
+        await asyncio.sleep(random.uniform(3, 5))
 
+        # Look for "Add or create" / "Add work" button
         add_btn_selectors = [
             'button:has-text("Add or create")',
             'button:has-text("Add work")',
@@ -31,13 +32,14 @@ async def paste_draft(assignment: Assignment, draft_text: str) -> bool:
         for selector in add_btn_selectors:
             try:
                 btn = page.locator(selector).first
-                if await btn.is_visible(timeout=2000):
+                if await btn.is_visible(timeout=3000):
                     await btn.click()
-                    await asyncio.sleep(1.5)
+                    await asyncio.sleep(2)
                     break
             except Exception:
                 continue
 
+        # Look for text editor
         editor_selectors = [
             '[contenteditable="true"]',
             'div[role="textbox"]',
@@ -49,7 +51,7 @@ async def paste_draft(assignment: Assignment, draft_text: str) -> bool:
         for selector in editor_selectors:
             try:
                 loc = page.locator(selector).first
-                if await loc.is_visible(timeout=2000):
+                if await loc.is_visible(timeout=3000):
                     editor = loc
                     break
             except Exception:
@@ -76,5 +78,3 @@ async def paste_draft(assignment: Assignment, draft_text: str) -> bool:
     except Exception:
         logger.exception("Paste failed for: %s", assignment.title)
         return False
-    finally:
-        await page.close()

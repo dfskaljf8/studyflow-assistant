@@ -2,26 +2,26 @@ import asyncio
 import logging
 import random
 
-from playwright.async_api import Page
-
-from browser.session import new_page
+from browser.session import new_page, safe_goto
 
 logger = logging.getLogger(__name__)
 
 
 async def create_draft_doc(title: str, body_text: str) -> str:
+    # Use a new tab for Docs so we don't lose Classroom session in main page
     page = await new_page()
 
     try:
-        await page.goto("https://docs.google.com/document/create", wait_until="domcontentloaded", timeout=60000)
+        await safe_goto(page, "https://docs.google.com/document/create",
+                        wait_selector='[contenteditable="true"]')
         await asyncio.sleep(3)
 
+        # Try to rename the doc
         title_input = page.locator('[class*="docs-title-input"], input[aria-label="Rename"]').first
         try:
             if await title_input.is_visible(timeout=5000):
                 await title_input.click()
                 await asyncio.sleep(0.5)
-                await page.keyboard.press("Control+A")
                 await page.keyboard.press("Meta+A")
                 await title_input.fill(f"{title} - Draft")
                 await page.keyboard.press("Enter")
@@ -44,7 +44,7 @@ async def create_draft_doc(title: str, body_text: str) -> str:
         await asyncio.sleep(2)
 
         doc_url = page.url
-        logger.info("Created draft doc: %s → %s", title, doc_url)
+        logger.info("Created draft doc: %s -> %s", title, doc_url)
         return doc_url
 
     except Exception:
