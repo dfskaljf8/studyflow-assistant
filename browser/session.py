@@ -21,6 +21,12 @@ async def get_browser_context() -> BrowserContext:
 
     settings.browser_data_dir.mkdir(parents=True, exist_ok=True)
 
+    # Remove stale lock file from unclean shutdown
+    lock_file = settings.browser_data_dir / "SingletonLock"
+    if lock_file.exists():
+        lock_file.unlink()
+        logger.info("Removed stale SingletonLock")
+
     _pw = await async_playwright().start()
     _context = await _pw.chromium.launch_persistent_context(
         user_data_dir=str(settings.browser_data_dir),
