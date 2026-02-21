@@ -84,19 +84,32 @@ async def safe_goto(page: Page, url: str, wait_selector: str | None = None, time
 
 
 async def check_logged_in(page: Page) -> bool:
-    print("\nOpening Google Classroom...")
+    print("\nOpening Google sign-in...")
 
+    # Go directly to Google Accounts sign-in targeting Classroom
+    sign_in_url = (
+        "https://accounts.google.com/ServiceLogin"
+        "?continue=https://classroom.google.com"
+        "&passive=true"
+    )
     try:
-        await page.goto("https://classroom.google.com", wait_until="domcontentloaded", timeout=60000)
+        await page.goto(sign_in_url, wait_until="domcontentloaded", timeout=60000)
     except Exception:
         pass
 
     await asyncio.sleep(3)
 
+    # Check if already signed in (redirected straight to Classroom)
+    current = page.url
+    if "classroom.google.com" in current and "accounts.google.com" not in current:
+        print("Already signed in!")
+        logger.info("Already signed in to Classroom")
+        return True
+
     print("\n" + "=" * 60)
     print("  SIGN IN TO YOUR SCHOOL ACCOUNT")
     print("")
-    print("  A browser window should be open.")
+    print("  A browser window should be open showing Google sign-in.")
     print("  1) Sign into your SCHOOL Google account")
     print("  2) Wait until you see your Google Classroom homepage")
     print("  3) Then come back here and press Enter")
@@ -108,13 +121,24 @@ async def check_logged_in(page: Page) -> bool:
 
     await asyncio.sleep(2)
     final_url = page.url
-    if "classroom.google.com" in final_url and "accounts.google.com" not in final_url:
+    if "classroom.google.com" in final_url or "classroom.google.com" in (await page.title()).lower():
         logger.info("Sign-in complete")
         print("Signed in successfully!")
         return True
     else:
+        # One more try: navigate to classroom now that cookies should be set
+        try:
+            await page.goto("https://classroom.google.com", wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(3)
+            if "classroom.google.com" in page.url:
+                logger.info("Sign-in complete (after redirect)")
+                print("Signed in successfully!")
+                return True
+        except Exception:
+            pass
+
         logger.warning("May not be signed in — current URL: %s", final_url)
-        print(f"Warning: doesn't look like Classroom loaded. Current page: {final_url}")
+        print(f"Warning: current page: {final_url}")
         print("Try running 'python main.py login' again.")
         return False
 
