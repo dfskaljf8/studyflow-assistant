@@ -10,6 +10,22 @@ from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
+IGNORE_KEYWORDS: list[str] = []
+
+
+def _load_ignore_list() -> list[str]:
+    global IGNORE_KEYWORDS
+    if not IGNORE_KEYWORDS:
+        raw = settings.ignore_courses
+        IGNORE_KEYWORDS = [k.strip().lower() for k in raw.split(",") if k.strip()]
+    return IGNORE_KEYWORDS
+
+
+def _should_skip(title: str, class_name: str) -> bool:
+    keywords = _load_ignore_list()
+    combined = f"{title} {class_name}".lower()
+    return any(kw in combined for kw in keywords)
+
 
 @dataclass
 class Assignment:
@@ -33,12 +49,11 @@ async def _save_debug(page: Page, name: str) -> None:
 
 async def _scan_todo_page(page: Page) -> list[dict]:
     """Scrape the To-do page for all assigned + missing work."""
-    # Navigate to the to-do page
     await safe_goto(page, "https://classroom.google.com/u/0/a/not-turned-in/all",
                     wait_selector='a[href*="/c/"]')
     await asyncio.sleep(3)
 
-    # Also click "Missing" tab to capture those too
+    # Click "Missing" tab to capture incomplete work
     try:
         missing_tab = page.locator('a:has-text("Missing"), [role="tab"]:has-text("Missing")').first
         if await missing_tab.is_visible(timeout=3000):
@@ -47,21 +62,12 @@ async def _scan_todo_page(page: Page) -> list[dict]:
     except Exception:
         pass
 
-    # Click "View all" if present to expand the list
-    try:
-        view_all = page.locator('a:has-text("View all"), button:has-text("View all")').first
-        if await view_all.is_visible(timeout=2000):
-            await view_all.click()
-            await asyncio.sleep(2)
-    except Exception:
-        pass
-
-    # Also expand "Next week" and "Later" sections
-    for section_text in ["Next week", "Later", "This week"]:
+    # Expand collapsed sections
+    for label in ["View all", "Next week", "Later", "This week"]:
         try:
-            section = page.locator(f'text="{section_text}"').first
-            if await section.is_visible(timeout=1000):
-                await section.click()
+            el = page.locator(f'text="{label}"').first
+            if await el.is_visible(timeout=1500):
+                await el.click()
                 await asyncio.sleep(1.5)
         except Exception:
             pass
@@ -72,24 +78,20 @@ async def _scan_todo_page(page: Page) -> list[dict]:
         () => {
             const results = [];
             const seen = new Set();
-
-            // Get all links that go to assignment pages
             const allLinks = document.querySelectorAll('a[href*="/c/"][href*="/a/"]');
+
             for (const a of allLinks) {
                 const href = (a.href || '').split('?')[0];
                 if (seen.has(href)) continue;
                 seen.add(href);
 
-                // Get the full text content of the link's container
                 const container = a.closest('li') || a.closest('[role="listitem"]') || a;
                 const fullText = container.textContent || '';
 
-                // Extract title: first meaningful text line
+                // Title: first meaningful text
                 let title = '';
-                const spans = a.querySelectorAll('div, span, p');
-                for (const s of spans) {
+                for (const s of a.querySelectorAll('div, span, p')) {
                     const t = s.textContent.trim();
-                    // Skip class names and dates (they contain specific patterns)
                     if (t.length > 3 && t.length < 200 &&
                         !t.match(/^Posted/) && !t.match(/^Due/) &&
                         !t.match(/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)/) &&
@@ -101,11 +103,10 @@ async def _scan_todo_page(page: Page) -> list[dict]:
                 if (!title) title = a.textContent.trim().split('\\n')[0].substring(0, 150);
                 if (!title || title.length < 2) continue;
 
-                // Extract class name (usually the second line under the title)
+                // Class name: line after the title
                 let className = '';
-                const allSpans = container.querySelectorAll('div, span');
                 let foundTitle = false;
-                for (const s of allSpans) {
+                for (const s of container.querySelectorAll('div, span')) {
                     const t = s.textContent.trim();
                     if (t === title) { foundTitle = true; continue; }
                     if (foundTitle && t.length > 2 && t.length < 100 &&
@@ -115,7 +116,6 @@ async def _scan_todo_page(page: Page) -> list[dict]:
                     }
                 }
 
-                // Extract due/posted info
                 let dueText = '';
                 const dateMatch = fullText.match(/(Due|Posted|Missing).{0,60}/i);
                 if (dateMatch) dueText = dateMatch[0].trim();
@@ -131,58 +131,48 @@ async def _scan_todo_page(page: Page) -> list[dict]:
         }
     """)
 
-    logger.info("To-do page: found %d items", len(items))
+    logger.info("To-do page: found %d raw items", len(items))
     return items
 
 
 async def _enrich_assignment(page: Page, assignment: Assignment) -> None:
-    """Navigate to assignment page to get description and attachments."""
+    """Navigate to assignment detail page for description + attachments."""
     if not assignment.assignment_url:
         return
 
     try:
-        await safe_goto(page, assignment.assignment_url, wait_selector='[dir="ltr"], [role="main"]')
-        await asyncio.sleep(2)
+        await safe_goto(page, assignment.assignment_url, wait_selector='[role="main"]')
+
+        # If page looks blank, try reload once
+        body_text = await page.evaluate("() => document.body?.innerText?.length || 0")
+        if body_text < 100:
+            logger.info("  Page looks blank, reloading...")
+            await page.reload(wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(4)
+
+        await _save_debug(page, f"assign_{assignment.title[:20].replace(' ','_')}")
 
         info = await page.evaluate("""
             () => {
-                // Try multiple selectors for description
                 let desc = '';
-                const selectors = [
-                    '[class*="z3vRcc"]',
-                    '[dir="ltr"]',
-                    '[class*="tLDEHd"]',
-                    '[role="main"] div'
-                ];
-                for (const sel of selectors) {
-                    const els = document.querySelectorAll(sel);
-                    for (const el of els) {
+                for (const sel of ['[class*="z3vRcc"]', '[dir="ltr"]', '[role="main"] div']) {
+                    for (const el of document.querySelectorAll(sel)) {
                         const t = el.textContent.trim();
-                        if (t.length > 20 && t.length > desc.length && t.length < 5000) {
-                            desc = t;
-                        }
+                        if (t.length > 20 && t.length > desc.length && t.length < 5000) desc = t;
                     }
                     if (desc.length > 20) break;
                 }
 
-                // Get class name from breadcrumb or header
                 let courseName = '';
-                const breadcrumbs = document.querySelectorAll(
-                    'a[href*="/c/"] span, [class*="onkcGd"], [class*="uDEFge"]'
-                );
-                for (const b of breadcrumbs) {
+                for (const b of document.querySelectorAll('a[href*="/c/"] span, [class*="onkcGd"]')) {
                     const t = b.textContent.trim();
-                    if (t.length > 2 && t.length < 100) {
-                        courseName = t;
-                        break;
-                    }
+                    if (t.length > 2 && t.length < 100) { courseName = t; break; }
                 }
 
                 const attachments = [];
-                const links = document.querySelectorAll(
+                for (const l of document.querySelectorAll(
                     'a[href*="drive.google.com"], a[href*="docs.google.com"], a[href*="youtube.com"]'
-                );
-                for (const l of links) attachments.push(l.href);
+                )) attachments.push(l.href);
 
                 return {
                     description: desc.substring(0, 2000),
@@ -206,27 +196,38 @@ async def scan_all_assignments() -> list[Assignment]:
 
     try:
         await check_logged_in(page)
-
         todo_items = await _scan_todo_page(page)
 
-        # Deduplicate by URL
+        # Deduplicate + filter
         seen_urls = set()
         all_assignments: list[Assignment] = []
+        skipped = 0
+
         for item in todo_items:
             url = item.get("url", "")
             if not url or url in seen_urls:
                 continue
             seen_urls.add(url)
 
-            a = Assignment(
-                course_name=item.get("class_name", ""),
-                title=item["title"],
+            title = item["title"]
+            class_name = item.get("class_name", "")
+
+            if _should_skip(title, class_name):
+                logger.info("  Skipping (club/extracurricular): %s — %s", class_name, title)
+                skipped += 1
+                continue
+
+            all_assignments.append(Assignment(
+                course_name=class_name,
+                title=title,
                 due_date_str=item.get("due_text", ""),
                 assignment_url=url,
-            )
-            all_assignments.append(a)
+            ))
 
-        logger.info("Found %d unique assignments, enriching each...", len(all_assignments))
+        if skipped:
+            logger.info("Skipped %d items from ignored courses", skipped)
+
+        logger.info("Found %d assignments to process, enriching...", len(all_assignments))
 
         for a in all_assignments:
             logger.info("  Enriching: %s", a.title)
