@@ -1,9 +1,13 @@
 import asyncio
 import logging
 
+from playwright.async_api import Page
+
 from browser.session import new_page, safe_goto
 
 logger = logging.getLogger(__name__)
+
+GMAIL_GOTO_TIMEOUT_MS = 25000
 
 
 def _build_summary_body(items: list[dict]) -> str:
@@ -51,6 +55,27 @@ async def _set_body_text(body_editor, text: str) -> bool:
         return False
 
 
+def _is_gmail_auth_page(page: Page) -> bool:
+    url = (page.url or "").lower()
+    return "accounts.google.com" in url or "service=mail" in url
+
+
+async def _find_compose_button(page: Page):
+    selectors = [
+        '[gh="cm"]',
+        '[role="button"][gh="cm"]',
+        '[role="button"]:has-text("Compose")',
+    ]
+    for selector in selectors:
+        try:
+            btn = page.locator(selector).first
+            if await btn.is_visible(timeout=5000):
+                return btn
+        except Exception:
+            continue
+    return None
+
+
 async def send_daily_summary(items: list[dict], recipient_email: str = "") -> None:
     if not items:
         logger.info("No assignments processed, skipping email")
@@ -59,25 +84,36 @@ async def send_daily_summary(items: list[dict], recipient_email: str = "") -> No
     page = await new_page()
 
     try:
-        await safe_goto(page, "https://mail.google.com/mail/u/0/#inbox",
-                        wait_selector='[role="button"]')
-        await asyncio.sleep(4)
+        await safe_goto(
+            page,
+            "https://mail.google.com/mail/u/0/#inbox",
+            wait_selector=None,
+            timeout=GMAIL_GOTO_TIMEOUT_MS,
+        )
+        await asyncio.sleep(1.5)
+
+        if _is_gmail_auth_page(page):
+            logger.warning("Gmail sign-in required for summary email; skipping")
+            return
 
         # Click compose
-        compose_btn = page.locator('[class*="T-I T-I-KE"], [role="button"]:has-text("Compose")').first
-        await compose_btn.click(timeout=15000)
-        await asyncio.sleep(1.5)
+        compose_btn = await _find_compose_button(page)
+        if not compose_btn:
+            logger.warning("Compose button not found in Gmail; skipping summary email")
+            return
+        await compose_btn.click(timeout=8000)
+        await asyncio.sleep(0.8)
 
         # Fill To
         to_field = page.locator('[aria-label="To recipients"], [name="to"], input[aria-label*="To"]').first
-        await to_field.click()
+        await to_field.click(timeout=8000)
         await to_field.fill(recipient_email or "me")
         await page.keyboard.press("Enter")
         await asyncio.sleep(0.2)
 
         # Fill Subject
         subject_field = page.locator('[name="subjectbox"], [aria-label="Subject"]').first
-        await subject_field.click()
+        await subject_field.click(timeout=8000)
         await subject_field.fill(f"StudyFlow: {len(items)} Draft(s) Ready for Review")
         await asyncio.sleep(0.1)
 
@@ -87,7 +123,7 @@ async def send_daily_summary(items: list[dict], recipient_email: str = "") -> No
             '[contenteditable="true"][aria-label*="Body"], '
             '[aria-label="Message Body"]'
         ).first
-        await body_editor.click()
+        await body_editor.click(timeout=8000)
         await asyncio.sleep(0.1)
 
         body_text = _build_summary_body(items)
@@ -97,8 +133,8 @@ async def send_daily_summary(items: list[dict], recipient_email: str = "") -> No
 
         await asyncio.sleep(0.3)
         send_btn = page.locator('[role="button"][aria-label*="Send"], [data-tooltip*="Send"]').first
-        await send_btn.click(timeout=15000)
-        await asyncio.sleep(2)
+        await send_btn.click(timeout=8000)
+        await asyncio.sleep(1.0)
 
         logger.info("Summary email sent")
 
