@@ -125,8 +125,23 @@ def delay_node(state: WorkflowState) -> dict:
 
 def summary_node(state: WorkflowState) -> dict:
     logger.info("=== Sending daily summary ===")
-    _run_async(send_daily_summary(state.get("processed", [])))
-    _run_async(close_browser())
+    try:
+        _run_async(asyncio.wait_for(
+            send_daily_summary(state.get("processed", [])),
+            timeout=settings.summary_email_timeout_seconds,
+        ))
+    except TimeoutError:
+        logger.warning(
+            "Summary email timed out after %ss; skipping",
+            settings.summary_email_timeout_seconds,
+        )
+    except Exception:
+        logger.exception("Summary email failed")
+
+    try:
+        _run_async(close_browser())
+    except Exception:
+        logger.exception("Failed to close browser cleanly")
 
     total = len(state["assignments"])
     done = len(state.get("processed", []))
