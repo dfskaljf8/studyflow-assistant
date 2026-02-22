@@ -19,7 +19,10 @@ class Settings(BaseSettings):
     delay_max_seconds: int = 720
 
     # Comma-separated keywords — courses matching any of these are skipped
-    ignore_courses: str = "FBLA,DECA,Speech and Debate,Honor Society,NHS,SAT Prep,SAT Math Boot Camp"
+    ignore_courses: str = (
+        "FBLA,DECA,Speech and Debate,Speech & Debate,Honor Society,"
+        "NHS,SAT Prep,SAT Math Boot Camp,Applicants,Math Honor"
+    )
 
     @property
     def project_root(self) -> Path:
