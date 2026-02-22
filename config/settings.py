@@ -17,6 +17,7 @@ class Settings(BaseSettings):
 
     delay_min_seconds: int = 180
     delay_max_seconds: int = 720
+    summary_email_timeout_seconds: int = 90
 
     # Comma-separated keywords — courses matching any of these are skipped
     ignore_courses: str = (
