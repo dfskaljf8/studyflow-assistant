@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -11,6 +12,15 @@ from config.settings import settings
 logger = logging.getLogger(__name__)
 
 IGNORE_KEYWORDS: list[str] = []
+
+
+def _extract_ids_from_url(url: str) -> tuple[str, str]:
+    if not url:
+        return "", ""
+    match = re.search(r"/c/([^/]+)/a/([^/?#]+)", url)
+    if not match:
+        return "", ""
+    return match.group(1), match.group(2)
 
 
 def _load_ignore_list() -> list[str]:
@@ -34,8 +44,12 @@ class Assignment:
     due_date_str: str = ""
     due_date: datetime | None = None
     assignment_url: str = ""
+    class_id: str = ""
+    assignment_id: str = ""
     description: str = ""
     attachment_urls: list[str] = field(default_factory=list)
+    delivery_method: str = ""
+    delivery_details: str = ""
 
 
 async def _save_debug(page: Page, name: str) -> None:
@@ -167,6 +181,18 @@ async def _enrich_assignment(page: Page, assignment: Assignment) -> None:
 
         info = await page.evaluate("""
             () => {
+                // Assignment title
+                let assignmentTitle = '';
+                for (const sel of ['h1', '[role="main"] h1', 'div[role="heading"][aria-level="1"]']) {
+                    const el = document.querySelector(sel);
+                    if (!el) continue;
+                    const t = (el.textContent || '').trim();
+                    if (t.length > 1 && t.length < 250) {
+                        assignmentTitle = t;
+                        break;
+                    }
+                }
+
                 // Description
                 let desc = '';
                 for (const sel of ['[class*="z3vRcc"]', '[dir="ltr"]', '[role="main"] div']) {
@@ -199,12 +225,17 @@ async def _enrich_assignment(page: Page, assignment: Assignment) -> None:
                 )) attachments.push(l.href);
 
                 return {
+                    title: assignmentTitle,
                     description: desc.substring(0, 2000),
                     attachments: [...new Set(attachments)],
                     course_name: courseName
                 };
             }
         """)
+
+        canonical_title = info.get("title", "")
+        if canonical_title:
+            assignment.title = canonical_title
 
         assignment.description = info.get("description", "")
         assignment.attachment_urls = info.get("attachments", [])
@@ -237,6 +268,7 @@ async def scan_all_assignments() -> list[Assignment]:
 
             title = item["title"]
             class_name = item.get("class_name", "")
+            class_id, assignment_id = _extract_ids_from_url(url)
 
             if _should_skip(title, class_name):
                 logger.info("  SKIP (pre-filter): %s — %s", class_name, title)
@@ -248,6 +280,8 @@ async def scan_all_assignments() -> list[Assignment]:
                 title=title,
                 due_date_str=item.get("due_text", ""),
                 assignment_url=url,
+                class_id=class_id,
+                assignment_id=assignment_id,
             ))
 
         logger.info("Pre-filter: %d candidates, %d skipped", len(candidates), skipped)

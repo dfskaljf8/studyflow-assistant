@@ -1,7 +1,7 @@
 import asyncio
 import logging
 
-from browser.session import new_page, safe_goto
+from browser.session import get_page, safe_goto
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +56,7 @@ async def send_daily_summary(items: list[dict], recipient_email: str = "") -> No
         logger.info("No assignments processed, skipping email")
         return
 
-    page = await new_page()
+    page = await get_page()
 
     try:
         await safe_goto(page, "https://mail.google.com/mail/u/0/#inbox",
@@ -102,7 +102,5 @@ async def send_daily_summary(items: list[dict], recipient_email: str = "") -> No
 
         logger.info("Summary email sent")
 
-    except Exception:
-        logger.exception("Failed to send email via Gmail")
-    finally:
-        await page.close()
+    except Exception as exc:
+        logger.warning("Failed to send email via Gmail: %s", exc)

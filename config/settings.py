@@ -2,8 +2,12 @@ from pathlib import Path
 from pydantic_settings import BaseSettings
 
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_ENV_FILE = _PROJECT_ROOT / ".env"
+
+
 class Settings(BaseSettings):
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {"env_file": str(_ENV_FILE), "env_file_encoding": "utf-8"}
 
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.0-flash"
@@ -19,6 +23,10 @@ class Settings(BaseSettings):
     delay_max_seconds: int = 720
     summary_email_timeout_seconds: int = 90
 
+    send_email_summary: bool = False
+    paste_retry_attempts: int = 2
+    paste_attempt_timeout_seconds: int = 55
+
     # Comma-separated keywords — courses matching any of these are skipped
     ignore_courses: str = (
         "FBLA,DECA,Speech and Debate,Speech & Debate,Honor Society,"
@@ -27,7 +35,7 @@ class Settings(BaseSettings):
 
     @property
     def project_root(self) -> Path:
-        return Path(__file__).resolve().parent.parent
+        return _PROJECT_ROOT
 
     @property
     def downloads_dir(self) -> Path:

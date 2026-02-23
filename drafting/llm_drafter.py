@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
 MAX_RETRIES = 4
+FALLBACK_MODELS = ["gemma-3-1b-it"]
 
 
 def _build_prompt(
@@ -58,8 +59,19 @@ def generate_draft(
     return _call_gemini(prompt)
 
 
-def _call_gemini(prompt: str) -> str:
-    url = GEMINI_URL.format(model=settings.gemini_model, key=settings.gemini_api_key)
+def _candidate_models() -> list[str]:
+    models = [settings.gemini_model, *FALLBACK_MODELS]
+    unique: list[str] = []
+    seen = set()
+    for model in models:
+        if model and model not in seen:
+            unique.append(model)
+            seen.add(model)
+    return unique
+
+
+def _call_model(prompt: str, model: str) -> str:
+    url = GEMINI_URL.format(model=model, key=settings.gemini_api_key)
 
     payload = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
@@ -69,7 +81,7 @@ def _call_gemini(prompt: str) -> str:
         },
     }).encode()
 
-    logger.info("Calling Gemini (%s)", settings.gemini_model)
+    logger.info("Calling Gemini model: %s", model)
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -91,9 +103,49 @@ def _call_gemini(prompt: str) -> str:
             return text
 
         except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt < MAX_RETRIES:
+            body = e.read().decode(errors="replace")
+            body_lower = body.lower()
+            hard_quota = "limit: 0" in body_lower
+
+            if e.code == 429 and attempt < MAX_RETRIES and not hard_quota:
                 wait = 15 * attempt
-                logger.warning("Rate limited (429). Retrying in %ds (attempt %d/%d)", wait, attempt, MAX_RETRIES)
+                logger.warning(
+                    "Rate limited on %s (429). Retrying in %ds (attempt %d/%d)",
+                    model,
+                    wait,
+                    attempt,
+                    MAX_RETRIES,
+                )
                 time.sleep(wait)
             else:
-                raise
+                raise RuntimeError(f"Gemini {model} HTTP {e.code}: {body[:500]}") from e
+
+        except urllib.error.URLError as e:
+            if attempt < MAX_RETRIES:
+                wait = 5 * attempt
+                logger.warning(
+                    "Network error on %s: %s. Retrying in %ds (attempt %d/%d)",
+                    model,
+                    e,
+                    wait,
+                    attempt,
+                    MAX_RETRIES,
+                )
+                time.sleep(wait)
+                continue
+            raise RuntimeError(f"Gemini {model} network error: {e}") from e
+
+    raise RuntimeError(f"Gemini {model} failed after retries")
+
+
+def _call_gemini(prompt: str) -> str:
+    errors: list[str] = []
+
+    for model in _candidate_models():
+        try:
+            return _call_model(prompt, model)
+        except Exception as exc:
+            errors.append(f"{model}: {exc}")
+            logger.warning("Model %s failed, trying next fallback if available", model)
+
+    raise RuntimeError("All Gemini models failed. " + " | ".join(errors))
