@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import random
 import re
 
 from playwright.async_api import Locator, Page
@@ -11,6 +12,9 @@ logger = logging.getLogger(__name__)
 
 MAX_COMMENT_PASTE_CHARS = 6000
 MAX_DOC_PASTE_CHARS = 20000
+HUMAN_TYPING_MIN_DELAY_MS = 18
+HUMAN_TYPING_MAX_DELAY_MS = 42
+TEMPLATE_MAX_FIELDS = 8
 
 
 def _normalize_text(value: str) -> str:
@@ -323,10 +327,194 @@ async def _focus_doc_editor(page: Page) -> bool:
     return True
 
 
-async def _insert_text_chunks(page: Page, text: str, chunk_size: int = 1200) -> None:
-    for i in range(0, len(text), chunk_size):
-        await page.keyboard.insert_text(text[i:i + chunk_size])
-        await asyncio.sleep(0.03)
+def _normalize_doc_text(text: str) -> str:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    return normalized.strip()
+
+
+def _estimate_template_fields(doc_text: str) -> int:
+    if not doc_text:
+        return 0
+
+    marker_count = len(re.findall(r"_{3,}|\[\s*\]|\(\s*\)", doc_text))
+    labeled_lines = sum(
+        1
+        for ln in doc_text.splitlines()
+        if ln.strip().endswith(":") and 2 <= len(ln.strip()) <= 80
+    )
+    q_count = len(re.findall(r"\b(question|prompt|response|answer)\b", doc_text, flags=re.IGNORECASE))
+    return min(TEMPLATE_MAX_FIELDS, max(marker_count, min(labeled_lines, TEMPLATE_MAX_FIELDS), min(q_count, TEMPLATE_MAX_FIELDS)))
+
+
+def _looks_like_template(doc_text: str) -> bool:
+    if not doc_text:
+        return False
+    fields = _estimate_template_fields(doc_text)
+    return fields >= 2
+
+
+def _split_template_answers(text: str, max_fields: int) -> list[str]:
+    blocks = [chunk.strip() for chunk in re.split(r"\n\s*\n+", text) if chunk.strip()]
+    if len(blocks) <= 1 and max_fields > 1:
+        blocks = [
+            chunk.strip()
+            for chunk in re.split(r"\n(?=\s*(?:\d+[.)]|[-*]))", text)
+            if chunk.strip()
+        ]
+
+    if not blocks:
+        return [text.strip()] if text.strip() else []
+
+    if max_fields > 0 and len(blocks) > max_fields:
+        kept = blocks[: max_fields - 1]
+        kept.append("\n\n".join(blocks[max_fields - 1:]))
+        return kept
+
+    return blocks
+
+
+async def _human_type_text(page: Page, text: str) -> None:
+    lines = text.split("\n")
+    for line_idx, line in enumerate(lines):
+        words = line.split(" ")
+        buffer: list[str] = []
+        burst_size = random.randint(2, 6)
+
+        for idx, word in enumerate(words):
+            piece = word
+            if idx < len(words) - 1:
+                piece += " "
+            buffer.append(piece)
+
+            if len(buffer) >= burst_size:
+                await page.keyboard.type(
+                    "".join(buffer),
+                    delay=random.randint(HUMAN_TYPING_MIN_DELAY_MS, HUMAN_TYPING_MAX_DELAY_MS),
+                )
+                buffer.clear()
+                burst_size = random.randint(2, 6)
+
+                if random.random() < 0.25:
+                    await asyncio.sleep(random.uniform(0.08, 0.35))
+
+        if buffer:
+            await page.keyboard.type(
+                "".join(buffer),
+                delay=random.randint(HUMAN_TYPING_MIN_DELAY_MS, HUMAN_TYPING_MAX_DELAY_MS),
+            )
+
+        if line_idx < len(lines) - 1:
+            await page.keyboard.press("Enter")
+            await asyncio.sleep(random.uniform(0.06, 0.2))
+
+
+async def _read_doc_snapshot(page: Page) -> str:
+    doc_url = _strip_query(page.url or "")
+    doc_id = _extract_doc_id(doc_url)
+
+    if doc_id:
+        export_url = f"https://docs.google.com/document/d/{doc_id}/export?format=txt"
+        try:
+            response = await page.context.request.get(export_url, timeout=15000)
+            if response.ok:
+                text = await response.text()
+                cleaned = _normalize_doc_text(text)
+                if cleaned:
+                    await response.dispose()
+                    return cleaned
+            await response.dispose()
+        except Exception:
+            pass
+
+    try:
+        text = await page.evaluate("() => document.body?.innerText || ''")
+        return _normalize_doc_text(text)
+    except Exception:
+        return ""
+
+
+async def _go_to_doc_start(page: Page) -> None:
+    try:
+        await page.keyboard.press("Meta+ArrowUp")
+        return
+    except Exception:
+        pass
+    try:
+        await page.keyboard.press("Control+Home")
+    except Exception:
+        pass
+
+
+async def _go_to_doc_end(page: Page) -> None:
+    try:
+        await page.keyboard.press("Meta+ArrowDown")
+        return
+    except Exception:
+        pass
+    try:
+        await page.keyboard.press("Control+End")
+    except Exception:
+        pass
+
+
+async def _jump_to_marker(page: Page, marker: str) -> bool:
+    try:
+        await page.keyboard.press("Meta+f")
+    except Exception:
+        try:
+            await page.keyboard.press("Control+f")
+        except Exception:
+            return False
+
+    await asyncio.sleep(0.2)
+    try:
+        await page.keyboard.type(marker, delay=25)
+        await asyncio.sleep(0.15)
+        await page.keyboard.press("Enter")
+        await asyncio.sleep(0.2)
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.2)
+        return True
+    except Exception:
+        return False
+
+
+async def _focus_first_template_field(page: Page) -> None:
+    for marker in ["___", "[ ]", "answer", "response", "claim", "reasoning", "type here"]:
+        if await _jump_to_marker(page, marker):
+            return
+
+    await _go_to_doc_start(page)
+
+
+async def _fill_template_fields(page: Page, text: str, doc_snapshot: str) -> bool:
+    field_count = _estimate_template_fields(doc_snapshot)
+    answers = _split_template_answers(text, max_fields=field_count or TEMPLATE_MAX_FIELDS)
+    if not answers:
+        return False
+
+    await _focus_first_template_field(page)
+    typed_any = False
+
+    for idx, answer in enumerate(answers):
+        if not answer.strip():
+            continue
+        await _human_type_text(page, answer.strip())
+        typed_any = True
+
+        if idx < len(answers) - 1:
+            try:
+                await page.keyboard.press("Tab")
+                await asyncio.sleep(random.uniform(0.12, 0.35))
+            except Exception:
+                try:
+                    await page.keyboard.press("Enter")
+                    await asyncio.sleep(random.uniform(0.12, 0.3))
+                except Exception:
+                    pass
+
+    return typed_any
 
 
 async def _paste_into_google_doc(page: Page, text: str) -> bool:
@@ -340,9 +528,22 @@ async def _paste_into_google_doc(page: Page, text: str) -> bool:
         return False
 
     try:
-        await page.keyboard.press("Meta+A")
-        await page.keyboard.press("Backspace")
-        await _insert_text_chunks(page, text)
+        doc_snapshot = await _read_doc_snapshot(page)
+        if _looks_like_template(doc_snapshot):
+            logger.info("  Paste: template-like doc detected, filling fields")
+            filled = await _fill_template_fields(page, text, doc_snapshot)
+            if filled:
+                await asyncio.sleep(0.8)
+                return True
+            logger.warning("  Paste: template fill could not be confirmed, falling back to append mode")
+
+        if doc_snapshot:
+            await _go_to_doc_end(page)
+            await asyncio.sleep(0.2)
+            await page.keyboard.press("Enter")
+            await asyncio.sleep(0.1)
+
+        await _human_type_text(page, text)
         await asyncio.sleep(0.8)
         return True
     except Exception as exc:

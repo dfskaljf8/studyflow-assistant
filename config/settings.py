@@ -25,7 +25,7 @@ class Settings(BaseSettings):
 
     send_email_summary: bool = False
     paste_retry_attempts: int = 2
-    paste_attempt_timeout_seconds: int = 55
+    paste_attempt_timeout_seconds: int = 150
 
     # Comma-separated keywords — courses matching any of these are skipped
     ignore_courses: str = (

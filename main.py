@@ -56,11 +56,23 @@ def main():
     parser = argparse.ArgumentParser(description="StudyFlow Assistant")
     parser.add_argument(
         "mode",
-        choices=["run", "schedule", "login"],
+        choices=[
+            "run",
+            "schedule",
+            "login",
+            "service-install",
+            "service-status",
+            "service-stop",
+            "service-uninstall",
+        ],
         help=(
             "'login' = open browser to sign into school account, "
             "'run' = execute once now, "
-            "'schedule' = start daily scheduler"
+            "'schedule' = start daily scheduler, "
+            "'service-install' = install and start always-on background service, "
+            "'service-status' = show background service status, "
+            "'service-stop' = stop background service, "
+            "'service-uninstall' = remove background service"
         ),
     )
     args = parser.parse_args()
@@ -101,6 +113,50 @@ def main():
         logger.info("Starting scheduler mode...")
         from scheduler.daily_scheduler import start_scheduler
         start_scheduler()
+
+    elif args.mode == "service-install":
+        from scheduler.service_manager import install_service, service_status
+
+        info = install_service(start=True)
+        status = service_status()
+
+        print("\nStudyFlow background service installed and started.")
+        print(f"Service: {status['service_target']}")
+        print(f"Plist:   {info.plist_path}")
+        print(f"State:   {status['state']}")
+        print(f"Logs:    {status['stdout_log_path']}")
+        print(f"Errors:  {status['stderr_log_path']}\n")
+
+    elif args.mode == "service-status":
+        from scheduler.service_manager import service_status
+
+        status = service_status()
+
+        print("\nStudyFlow background service status")
+        print(f"Service: {status['service_target']}")
+        print(f"Loaded:  {status['loaded']}")
+        print(f"State:   {status['state']}")
+        print(f"Plist:   {status['plist_path']}")
+        print(f"Logs:    {status['stdout_log_path']}")
+        print(f"Errors:  {status['stderr_log_path']}")
+
+        raw = status.get("raw_output")
+        if raw:
+            print("\nlaunchctl output:")
+            print(raw)
+        print()
+
+    elif args.mode == "service-stop":
+        from scheduler.service_manager import stop_service
+
+        info = stop_service()
+        print(f"\nStopped StudyFlow background service: {info.service_target}\n")
+
+    elif args.mode == "service-uninstall":
+        from scheduler.service_manager import uninstall_service
+
+        info = uninstall_service()
+        print(f"\nUninstalled StudyFlow background service plist: {info.plist_path}\n")
 
 
 if __name__ == "__main__":

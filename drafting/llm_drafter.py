@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import time
 import urllib.request
 import urllib.error
@@ -12,6 +13,17 @@ logger = logging.getLogger(__name__)
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
 MAX_RETRIES = 4
 FALLBACK_MODELS = ["gemma-3-1b-it"]
+
+
+def _clean_student_style_text(text: str) -> str:
+    cleaned = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    cleaned = cleaned.replace("—", "-").replace("–", "-")
+    cleaned = cleaned.replace("“", '"').replace("”", '"').replace("’", "'")
+    cleaned = cleaned.replace(";", ",")
+    cleaned = re.sub(r"([!?.,])\1+", r"\1", cleaned)
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
 
 
 def _build_prompt(
@@ -27,15 +39,18 @@ def _build_prompt(
     for i, mt in enumerate(material_texts, 1):
         materials_block += f"\n--- Attached Material {i} ---\n{mt}\n"
 
-    return f"""You are ghostwriting a homework assignment for a high school student.
+    return f"""You are writing a homework response in a student's personal voice.
 
 CRITICAL RULES:
-- Match the student's EXACT writing style shown in the examples below
-- Use casual high-school tone: short sentences, natural flow, some slang (like "fr", "lowkey", "ngl", "tbh")
+- Match the student's writing style and punctuation from the examples as closely as possible
+- Keep punctuation simple and light (mostly periods/commas). Avoid semicolons, em dashes, and overly formal transitions
+- Do NOT force slang that is not present in the examples
 - NEVER sound robotic, formal, or AI-generated
-- Include minor natural imperfections (occasional informal grammar, varied sentence length)
+- Keep wording natural, like real student writing with normal imperfections
 - Answer the assignment accurately and completely
-- Keep it the right length for a high school assignment (not too long, not too short)
+- Read both the Classroom instructions and all attached material text before writing
+- If attached materials include template prompts/questions/boxes, answer in the same order and keep each answer concise
+- Keep it the right length for this assignment (not too long, not too short)
 
 STUDENT'S WRITING STYLE EXAMPLES:
 {examples_block}
@@ -56,7 +71,8 @@ def generate_draft(
     material_texts: list[str] | None = None,
 ) -> str:
     prompt = _build_prompt(assignment, style_examples, material_texts or [])
-    return _call_gemini(prompt)
+    generated = _call_gemini(prompt)
+    return _clean_student_style_text(generated)
 
 
 def _candidate_models() -> list[str]:

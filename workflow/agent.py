@@ -40,6 +40,14 @@ class WorkflowState(TypedDict):
     errors: list[str]
 
 
+def _looks_like_url_list(text: str) -> bool:
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return True
+    url_lines = sum(1 for line in lines if line.startswith("http://") or line.startswith("https://"))
+    return (url_lines / len(lines)) >= 0.8
+
+
 def _acquire_run_lock() -> tuple[TextIO | None, str]:
     if fcntl is None:
         return None, ""
@@ -164,10 +172,10 @@ def process_assignment_node(state: WorkflowState) -> dict:
     errors = list(state.get("errors", []))
 
     try:
-        logger.info("  Step 1/5: Collecting attachment links")
+        logger.info("  Step 1/5: Collecting attachment links + doc instructions")
         downloaded = []
         try:
-            downloaded = _run_async(download_materials(a), timeout_seconds=30)
+            downloaded = _run_async(download_materials(a), timeout_seconds=75)
         except TimeoutError:
             logger.warning("  Attachment collection timed out; continuing without materials")
         except Exception as exc:
@@ -176,7 +184,13 @@ def process_assignment_node(state: WorkflowState) -> dict:
         material_texts = []
         for p in downloaded:
             if p.suffix in (".txt", ".md", ".csv"):
-                material_texts.append(p.read_text(errors="ignore")[:2000])
+                text = p.read_text(errors="ignore")
+                if p.name == "links.txt" and _looks_like_url_list(text):
+                    continue
+                text = text.strip()
+                if not text:
+                    continue
+                material_texts.append(f"[Source: {p.name}]\n{text[:3500]}")
 
         logger.info("  Step 2/5: Generating draft")
         draft = generate_draft(a, state["style_examples"], material_texts)
