@@ -84,9 +84,11 @@ CRITICAL RULES:
 - Keep wording natural, like real student writing with normal imperfections
 - Answer the assignment accurately and completely
 - Read both the Classroom instructions and all attached material text before writing
-- If attached materials include template prompts/questions/boxes, answer in the same order and keep each answer concise
+- If attached materials include template prompts/questions/boxes, answer EACH question separately in order
+- NEVER combine multiple answers into one block. Each question/box gets its own separate answer.
 - Keep it the right length for this assignment (not too long, not too short)
 - Prefer simple punctuation and shorter sentences over polished formal phrasing
+- Carefully read all on-screen instructions in the template before answering
 
 STUDENT'S WRITING STYLE EXAMPLES:
 {examples_block}
@@ -132,10 +134,13 @@ RESPONSE RULES (MANDATORY):
     ]
   }}
 - "index" MUST match the question number (0-based) from the DETECTED QUESTIONS list.
-- Always produce exactly one answer object per detected question in the same order as provided.
+- Always produce EXACTLY ONE answer object per detected question in the same order as provided.
+- NEVER combine multiple answers into one. Each question gets its own separate answer object.
+- Each answer will be typed into its own separate text box on the document. Do not cram everything together.
 - If matching is uncertain, still return one answer per question using the closest snippet or positional order.
 - Keep punctuation simple and natural. Avoid formal AI tone.
 - No placeholders like <text>, [insert], or TODO.
+- Read any on-screen instructions or prompts carefully and follow them exactly.
 
 STUDENT STYLE EXAMPLES:
 {examples_block}
@@ -345,13 +350,31 @@ def _call_model(prompt: str, model: str) -> str:
                 method="POST",
             )
             with urllib.request.urlopen(req, timeout=60) as resp:
-                data = json.loads(resp.read())
+                raw_body = resp.read()
+
+            if not raw_body or not raw_body.strip():
+                if attempt < MAX_RETRIES:
+                    wait = 10 * attempt
+                    logger.warning("Model %s returned empty body (possible rate limit). Retrying in %ds", model, wait)
+                    time.sleep(wait)
+                    continue
+                raise RuntimeError(f"Gemini {model} returned empty response body after retries")
+
+            data = json.loads(raw_body)
 
             candidates = data.get("candidates", [])
             if not candidates:
                 raise RuntimeError(f"Gemini returned no candidates: {data}")
 
-            text = candidates[0]["content"]["parts"][0]["text"]
+            text = (candidates[0].get("content", {}).get("parts", [{}])[0].get("text") or "").strip()
+            if not text:
+                if attempt < MAX_RETRIES:
+                    wait = 10 * attempt
+                    logger.warning("Model %s returned empty text in candidates. Retrying in %ds", model, wait)
+                    time.sleep(wait)
+                    continue
+                raise RuntimeError(f"Gemini {model} returned empty text after retries")
+
             logger.info("Draft generated: %d chars", len(text))
             return text
 

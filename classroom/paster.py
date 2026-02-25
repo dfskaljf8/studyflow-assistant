@@ -2,6 +2,7 @@ import asyncio
 import logging
 import random
 import re
+from dataclasses import dataclass
 
 from playwright.async_api import Locator, Page
 
@@ -753,40 +754,71 @@ async def _focus_first_template_field(page: Page) -> None:
     await _go_to_doc_start(page)
 
 
-async def _detect_doc_table_layout(page: Page, doc_id: str) -> bool:
-    """Check if the doc uses a 2-column table (prompt | answer box) layout via HTML export."""
+@dataclass
+class _DocTableInfo:
+    is_table: bool = False
+    layout: str = ""  # "side" = answer box beside prompt, "below" = answer box under prompt
+
+
+async def _detect_doc_table_layout(page: Page, doc_id: str) -> _DocTableInfo:
+    """Detect if the doc uses a table layout and whether answer boxes are beside or below prompts."""
+    result = _DocTableInfo()
     if not doc_id:
-        return False
+        return result
     html_url = f"https://docs.google.com/document/d/{doc_id}/export?format=html"
     try:
         resp = await page.context.request.get(html_url, timeout=15000)
         if not resp.ok:
             await resp.dispose()
-            return False
+            return result
         html = await resp.text()
         await resp.dispose()
         import re as _re
         tables = _re.findall(r"<table[^>]*>.*?</table>", html, _re.DOTALL)
         if not tables:
-            return False
-        rows = _re.findall(r"<tr[^>]*>(.*?)</tr>", tables[0], _re.DOTALL)
-        if len(rows) < 2:
-            return False
-        two_col_rows = 0
-        for row in rows:
-            cells = _re.findall(r"<td[^>]*>(.*?)</td>", row, _re.DOTALL)
-            if len(cells) == 2:
-                left_text = _re.sub(r"<[^>]+>", "", cells[0]).strip()
-                right_text = _re.sub(r"<[^>]+>", "", cells[1]).strip()
-                if left_text and not right_text:
-                    two_col_rows += 1
-        return two_col_rows >= 2
+            return result
+
+        for table_html in tables:
+            rows = _re.findall(r"<tr[^>]*>(.*?)</tr>", table_html, _re.DOTALL)
+            if len(rows) < 2:
+                continue
+
+            # Check for side-by-side layout: prompt in left cell, empty right cell
+            side_rows = 0
+            for row in rows:
+                cells = _re.findall(r"<td[^>]*>(.*?)</td>", row, _re.DOTALL)
+                if len(cells) == 2:
+                    left = _re.sub(r"<[^>]+>", "", cells[0]).strip()
+                    right = _re.sub(r"<[^>]+>", "", cells[1]).strip()
+                    if left and not right:
+                        side_rows += 1
+            if side_rows >= 2:
+                result.is_table = True
+                result.layout = "side"
+                return result
+
+            # Check for stacked layout: prompt row then empty answer row (single-column or wide cell)
+            below_pairs = 0
+            for i in range(len(rows) - 1):
+                cells_this = _re.findall(r"<td[^>]*>(.*?)</td>", rows[i], _re.DOTALL)
+                cells_next = _re.findall(r"<td[^>]*>(.*?)</td>", rows[i + 1], _re.DOTALL)
+                this_text = " ".join(_re.sub(r"<[^>]+>", "", c).strip() for c in cells_this)
+                next_text = " ".join(_re.sub(r"<[^>]+>", "", c).strip() for c in cells_next)
+                if this_text and not next_text:
+                    below_pairs += 1
+            if below_pairs >= 2:
+                result.is_table = True
+                result.layout = "below"
+                return result
+
+        return result
     except Exception:
-        return False
+        return result
 
 
 async def _type_answer_into_adjacent_cell(page: Page, prompt: str, answer: str) -> bool:
-    """For table-layout docs: Find the prompt, then Tab into the adjacent answer cell."""
+    """For table-layout docs (side): Find the prompt, then Tab into the adjacent answer cell.
+    NEVER deletes existing content -- only types into the cell."""
     prompt_query = re.sub(r"\s+", " ", prompt).strip()
     if len(prompt_query) > 90:
         prompt_query = prompt_query[:90]
@@ -797,7 +829,7 @@ async def _type_answer_into_adjacent_cell(page: Page, prompt: str, answer: str) 
     if not found:
         return False
 
-    # In Google Docs tables, Tab moves to the next cell in the row
+    # Close Find bar, then Tab to adjacent cell
     try:
         await page.keyboard.press("Escape")
         await asyncio.sleep(0.15)
@@ -807,11 +839,34 @@ async def _type_answer_into_adjacent_cell(page: Page, prompt: str, answer: str) 
     await page.keyboard.press("Tab")
     await asyncio.sleep(0.25)
 
-    # Select all existing content in this cell and delete it
-    await page.keyboard.press(f"{MOD_KEY}+A")
+    await _human_type_text(page, answer)
+    await asyncio.sleep(0.35)
+    return True
+
+
+async def _type_answer_into_cell_below(page: Page, prompt: str, answer: str) -> bool:
+    """For table-layout docs (below): Find the prompt, then move down into the answer cell beneath."""
+    prompt_query = re.sub(r"\s+", " ", prompt).strip()
+    if len(prompt_query) > 90:
+        prompt_query = prompt_query[:90]
+    if not prompt_query:
+        return False
+
+    found = await _jump_to_marker(page, prompt_query)
+    if not found:
+        return False
+
+    try:
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.15)
+    except Exception:
+        pass
+
+    # Move to end of prompt cell, then down into the answer cell below
+    await page.keyboard.press("End")
     await asyncio.sleep(0.08)
-    await page.keyboard.press("Backspace")
-    await asyncio.sleep(0.08)
+    await page.keyboard.press("ArrowDown")
+    await asyncio.sleep(0.2)
 
     await _human_type_text(page, answer)
     await asyncio.sleep(0.35)
@@ -819,7 +874,8 @@ async def _type_answer_into_adjacent_cell(page: Page, prompt: str, answer: str) 
 
 
 async def _type_answer_under_prompt(page: Page, prompt: str, answer: str) -> bool:
-    """For non-table docs: Find the prompt, move below it, then type."""
+    """For non-table docs: Find the prompt, move to the empty area below it, then type.
+    NEVER deletes existing content -- only adds text where the cursor lands."""
     prompt_query = re.sub(r"\s+", " ", prompt).strip()
     if len(prompt_query) > 90:
         prompt_query = prompt_query[:90]
@@ -832,22 +888,19 @@ async def _type_answer_under_prompt(page: Page, prompt: str, answer: str) -> boo
         return False
 
     try:
-        await page.keyboard.press("End")
-        await asyncio.sleep(0.08)
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.15)
     except Exception:
         pass
 
-    try:
-        await page.keyboard.press("ArrowDown")
-        await asyncio.sleep(0.08)
-    except Exception:
-        pass
-
-    try:
-        await page.keyboard.press("Enter")
-        await asyncio.sleep(0.12)
-    except Exception:
-        pass
+    # Move to end of prompt line, then down to the answer area
+    await page.keyboard.press("End")
+    await asyncio.sleep(0.08)
+    await page.keyboard.press("ArrowDown")
+    await asyncio.sleep(0.08)
+    # Go to start of the answer line so we type at the beginning
+    await page.keyboard.press("Home")
+    await asyncio.sleep(0.08)
 
     await _human_type_text(page, answer)
     await asyncio.sleep(0.35)
@@ -880,9 +933,12 @@ async def _fill_template_fields(
         attachment_summary=attachment_summary,
     )
 
-    if is_table:
-        logger.info("  Paste: table-layout doc detected, using Tab navigation (%d prompts, %d answers)", len(prompts), len(answers))
+    if is_table.is_table and is_table.layout == "side":
+        logger.info("  Paste: table-layout (side) doc, Tab into adjacent boxes (%d prompts, %d answers)", len(prompts), len(answers))
         placer = lambda prompt, answer: _type_answer_into_adjacent_cell(page, prompt, answer)
+    elif is_table.is_table and is_table.layout == "below":
+        logger.info("  Paste: table-layout (below) doc, ArrowDown into boxes (%d prompts, %d answers)", len(prompts), len(answers))
+        placer = lambda prompt, answer: _type_answer_into_cell_below(page, prompt, answer)
     else:
         logger.info("  Paste: non-table doc, using prompt-anchored fill (%d prompts, %d answers)", len(prompts), len(answers))
         placer = lambda prompt, answer: _type_answer_under_prompt(page, prompt, answer)
