@@ -69,6 +69,8 @@ def _build_prompt(
     else:
         output_rules = (
             "OUTPUT FORMAT RULES:\n"
+            "- If there are numbered questions, answer each one on its own line with the question number (e.g. '1. answer here')\n"
+            "- Put each answer in its RESPECTIVE position -- never combine answers\n"
             "- Return plain assignment text only\n"
             "- No markdown, no bold markers, no heading symbols\n"
             "- No placeholder text like <text> or [insert]\n"
@@ -129,18 +131,24 @@ RESPONSE RULES (MANDATORY):
 - JSON schema:
   {{
     "answers": [
-      {{"index": 0, "question_snippet": "short match of question 1", "answer": "full answer in student style"}},
-      {{"index": 1, "question_snippet": "short match of question 2", "answer": "..."}}
+      {{"index": 0, "question_snippet": "short match of question 1", "question_type": "fill_blank|multiple_choice|free_response", "answer": "the answer"}},
+      {{"index": 1, "question_snippet": "short match of question 2", "question_type": "...", "answer": "..."}}
     ]
   }}
 - "index" MUST match the question number (0-based) from the DETECTED QUESTIONS list.
+- "question_type" MUST be one of:
+    "fill_blank" = question has a blank/underline to fill in (answer is just the word/phrase for the blank)
+    "multiple_choice" = question has answer choices like A) B) C) D) (answer is ONLY the letter+choice to highlight, e.g. "C) Honesty")
+    "free_response" = open-ended question requiring a written answer (answer goes under the question)
 - Always produce EXACTLY ONE answer object per detected question in the same order as provided.
 - NEVER combine multiple answers into one. Each question gets its own separate answer object.
-- Each answer will be typed into its own separate text box on the document. Do not cram everything together.
-- If matching is uncertain, still return one answer per question using the closest snippet or positional order.
+- Each answer will be placed in its own RESPECTIVE position on the document.
+- For fill_blank: return ONLY the word(s) that go in the blank, nothing else.
+- For multiple_choice: return ONLY the correct choice like "C) Honesty" -- do not explain.
+- For free_response: write a natural student-style answer.
 - Keep punctuation simple and natural. Avoid formal AI tone.
 - No placeholders like <text>, [insert], or TODO.
-- Read any on-screen instructions or prompts carefully and follow them exactly.
+- Read the question text carefully and follow any instructions exactly.
 
 STUDENT STYLE EXAMPLES:
 {examples_block}
@@ -239,21 +247,24 @@ def _parse_structured_answers(raw: str, question_snippets: list[str]) -> list[di
             question = str(item.get("question") or item.get("question_snippet") or "").strip()
             answer = str(item.get("answer") or item.get("response") or "").strip()
             raw_index = item.get("index")
+            q_type = str(item.get("question_type") or "free_response").strip().lower()
         elif isinstance(item, str):
             question = ""
             answer = item.strip()
             raw_index = None
+            q_type = "free_response"
         else:
             continue
 
         if not answer:
             continue
 
-        answer = _clean_student_style_text(answer)
+        if q_type != "multiple_choice":
+            answer = _clean_student_style_text(answer)
         if not question and idx < len(question_snippets):
             question = question_snippets[idx]
 
-        entry: dict[str, str] = {"question": question, "answer": answer}
+        entry: dict[str, str] = {"question": question, "answer": answer, "question_type": q_type}
         if raw_index is not None:
             entry["index"] = str(raw_index)
             entry["question_snippet"] = question
