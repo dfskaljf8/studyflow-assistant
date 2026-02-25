@@ -16,4 +16,5 @@ my_past_work/*
 *.log
 .playwright/
 .browser_data/
+ap_session.json
 debug_*.png

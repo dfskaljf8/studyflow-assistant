@@ -60,13 +60,15 @@ def main():
             "run",
             "schedule",
             "login",
+            "ap-login",
             "service-install",
             "service-status",
             "service-stop",
             "service-uninstall",
         ],
         help=(
-            "'login' = open browser to sign into school account, "
+            "'login' = open browser to sign into school Google account, "
+            "'ap-login' = open browser to sign into AP Classroom (College Board), "
             "'run' = execute once now, "
             "'schedule' = start daily scheduler, "
             "'service-install' = install and start always-on background service, "
@@ -99,6 +101,22 @@ def main():
                 print("\nLogin failed. Please try again: python main.py login")
 
         asyncio.run(do_login())
+
+    elif args.mode == "ap-login":
+        os.environ["STUDYFLOW_MODE"] = "login"
+        import asyncio
+        from browser.ap_session import ap_first_run_login, close_ap_browser
+
+        async def do_ap_login():
+            success = await ap_first_run_login()
+            await close_ap_browser()
+            if success:
+                print("\nAP session saved. Future runs will use it automatically (headless).")
+                print("You can now run: python main.py run")
+            else:
+                print("\nAP login not detected. Please try again: python main.py ap-login")
+
+        asyncio.run(do_ap_login())
 
     elif args.mode == "run":
         os.environ["STUDYFLOW_MODE"] = "run"

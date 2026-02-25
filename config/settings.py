@@ -14,9 +14,14 @@ class Settings(BaseSettings):
 
     studyflow_sheet_url: str = ""
 
-    schedule_start_hour: int = 8
+    schedule_start_hour: int = 9
+    schedule_start_minute: int = 0
     schedule_end_hour: int = 14
+    schedule_end_minute: int = 25
     schedule_interval_minutes: int = 30
+    schedule_poll_seconds: int = 60
+    schedule_bootstrap_existing_assignments: bool = True
+    schedule_failed_retry_minutes: int = 25
     schedule_days: str = "mon,tue,wed,thu,fri"
 
     delay_min_seconds: int = 180
@@ -25,13 +30,17 @@ class Settings(BaseSettings):
 
     send_email_summary: bool = False
     paste_retry_attempts: int = 2
-    paste_attempt_timeout_seconds: int = 150
+    paste_attempt_timeout_seconds: int = 300
 
     # Comma-separated keywords — courses matching any of these are skipped
     ignore_courses: str = (
         "FBLA,DECA,Speech and Debate,Speech & Debate,Honor Society,"
-        "NHS,SAT Prep,SAT Math Boot Camp,Applicants,Math Honor"
+        "NHS,SAT Prep,SAT Math Boot Camp,Applicants,Math Honor,"
+        "AP US History,AP United States History,APUSH"
     )
+
+    # Comma-separated keywords — assignment titles matching any of these are skipped
+    ignore_assignments: str = "LEQ,DBQ,MCQ,SAQ,FRQ"
 
     @property
     def project_root(self) -> Path:
@@ -48,6 +57,10 @@ class Settings(BaseSettings):
     @property
     def browser_data_dir(self) -> Path:
         return self.project_root / ".browser_data"
+
+    @property
+    def assignment_state_file(self) -> Path:
+        return self.project_root / ".assignment_state.json"
 
 
 settings = Settings()

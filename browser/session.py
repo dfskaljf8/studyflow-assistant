@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 _pw = None
 _context: BrowserContext | None = None
 _main_page: Page | None = None
+DEFAULT_TIMEOUT_MS = 90000
 
 
 def _cleanup_stale_browser() -> None:
@@ -66,6 +67,8 @@ async def get_browser_context() -> BrowserContext:
         viewport={"width": 1366, "height": 900},
         locale="en-US",
     )
+    _context.set_default_timeout(DEFAULT_TIMEOUT_MS)
+    _context.set_default_navigation_timeout(DEFAULT_TIMEOUT_MS)
 
     logger.info("Browser launched with persistent session")
     return _context
@@ -82,6 +85,8 @@ async def get_page() -> Page:
         _main_page = ctx.pages[0]
     else:
         _main_page = await ctx.new_page()
+    _main_page.set_default_timeout(DEFAULT_TIMEOUT_MS)
+    _main_page.set_default_navigation_timeout(DEFAULT_TIMEOUT_MS)
     await apply_stealth(_main_page)
     return _main_page
 
@@ -90,6 +95,8 @@ async def new_page() -> Page:
     """Open an extra tab (for parallel work). Prefer get_page() for most ops."""
     ctx = await get_browser_context()
     page = await ctx.new_page()
+    page.set_default_timeout(DEFAULT_TIMEOUT_MS)
+    page.set_default_navigation_timeout(DEFAULT_TIMEOUT_MS)
     await apply_stealth(page)
     return page
 

@@ -12,6 +12,7 @@ from config.settings import settings
 logger = logging.getLogger(__name__)
 
 IGNORE_KEYWORDS: list[str] = []
+IGNORE_ASSIGN_KEYWORDS: list[str] = []
 
 
 def _extract_ids_from_url(url: str) -> tuple[str, str]:
@@ -31,10 +32,25 @@ def _load_ignore_list() -> list[str]:
     return IGNORE_KEYWORDS
 
 
+def _load_ignore_assign_list() -> list[str]:
+    global IGNORE_ASSIGN_KEYWORDS
+    if not IGNORE_ASSIGN_KEYWORDS:
+        raw = getattr(settings, "ignore_assignments", "")
+        IGNORE_ASSIGN_KEYWORDS = [k.strip().lower() for k in raw.split(",") if k.strip()]
+    return IGNORE_ASSIGN_KEYWORDS
+
+
 def _should_skip(title: str, class_name: str) -> bool:
-    keywords = _load_ignore_list()
+    course_kws = _load_ignore_list()
     combined = f"{title} {class_name}".lower()
-    return any(kw in combined for kw in keywords)
+    if any(kw in combined for kw in course_kws):
+        return True
+    assign_kws = _load_ignore_assign_list()
+    title_lower = title.lower()
+    for kw in assign_kws:
+        if re.search(r"\b" + re.escape(kw) + r"\b", title_lower):
+            return True
+    return False
 
 
 @dataclass
@@ -62,22 +78,22 @@ async def _save_debug(page: Page, name: str) -> None:
         pass
 
 
-async def _scan_missing_tab(page: Page) -> list[dict]:
-    """Scan only the Missing tab — these are the assignments you actually need to do."""
+async def _scan_todo_tab(page: Page, tab_label: str) -> list[dict]:
+    """Scan a specific Classroom To-do tab (Assigned/Missing)."""
     # Go to to-do page
     await safe_goto(page, "https://classroom.google.com/u/0/a/not-turned-in/all",
                     wait_selector='a[href*="/c/"]')
     await asyncio.sleep(3)
 
-    # Click "Missing" tab
+    # Click selected tab
     try:
-        missing_tab = page.locator('a:has-text("Missing"), [role="tab"]:has-text("Missing")').first
-        if await missing_tab.is_visible(timeout=5000):
-            await missing_tab.click()
+        tab = page.locator(f'a:has-text("{tab_label}"), [role="tab"]:has-text("{tab_label}")').first
+        if await tab.is_visible(timeout=5000):
+            await tab.click()
             await asyncio.sleep(3)
-            logger.info("Clicked Missing tab")
+            logger.info("Clicked %s tab", tab_label)
     except Exception:
-        logger.warning("Could not click Missing tab")
+        logger.warning("Could not click %s tab", tab_label)
 
     # Expand all collapsed sections
     for label in ["This week", "Last week", "Earlier", "Next week", "Later"]:
@@ -89,7 +105,7 @@ async def _scan_missing_tab(page: Page) -> list[dict]:
         except Exception:
             pass
 
-    await _save_debug(page, "missing_tab")
+    await _save_debug(page, f"todo_tab_{tab_label.lower()}")
 
     items = await page.evaluate("""
         () => {
@@ -154,7 +170,7 @@ async def _scan_missing_tab(page: Page) -> list[dict]:
         }
     """)
 
-    logger.info("Missing tab: found %d raw items", len(items))
+    logger.info("%s tab: found %d raw items", tab_label, len(items))
     return items
 
 
@@ -193,6 +209,13 @@ async def _enrich_assignment(page: Page, assignment: Assignment) -> None:
                     }
                 }
 
+                if (!assignmentTitle || /^classroom/i.test(assignmentTitle)) {
+                    const fromTitle = (document.title || '').replace(/\\s*-\\s*Google Classroom.*$/i, '').trim();
+                    if (fromTitle && !/^classroom$/i.test(fromTitle)) {
+                        assignmentTitle = fromTitle;
+                    }
+                }
+
                 // Description
                 let desc = '';
                 for (const sel of ['[class*="z3vRcc"]', '[dir="ltr"]', '[role="main"] div']) {
@@ -210,10 +233,13 @@ async def _enrich_assignment(page: Page, assignment: Assignment) -> None:
                 if (breadcrumb) {
                     courseName = breadcrumb.textContent.trim();
                 }
+                if (/^classroom$/i.test(courseName)) {
+                    courseName = '';
+                }
                 if (!courseName) {
                     for (const b of document.querySelectorAll('[class*="onkcGd"], [class*="uDEFge"]')) {
                         const t = b.textContent.trim();
-                        if (t.length > 2 && t.length < 100) { courseName = t; break; }
+                        if (t.length > 2 && t.length < 100 && !/^classroom$/i.test(t)) { courseName = t; break; }
                     }
                 }
 
@@ -221,7 +247,8 @@ async def _enrich_assignment(page: Page, assignment: Assignment) -> None:
                 const attachments = [];
                 for (const l of document.querySelectorAll(
                     'a[href*="drive.google.com"], a[href*="docs.google.com"], ' +
-                    'a[href*="youtube.com"], a[href*="forms.google.com"]'
+                    'a[href*="youtube.com"], a[href*="forms.google.com"], ' +
+                    'a[href*="collegeboard.org"], a[href*="myap"], a[href*="apclassroom"]'
                 )) attachments.push(l.href);
 
                 return {
@@ -234,13 +261,13 @@ async def _enrich_assignment(page: Page, assignment: Assignment) -> None:
         """)
 
         canonical_title = info.get("title", "")
-        if canonical_title:
+        if canonical_title and not canonical_title.lower().startswith("classroom"):
             assignment.title = canonical_title
 
         assignment.description = info.get("description", "")
         assignment.attachment_urls = info.get("attachments", [])
         enriched_name = info.get("course_name", "")
-        if enriched_name:
+        if enriched_name and enriched_name.lower() != "classroom":
             assignment.course_name = enriched_name
 
     except Exception:
@@ -253,7 +280,9 @@ async def scan_all_assignments() -> list[Assignment]:
     try:
         await check_logged_in(page)
 
-        todo_items = await _scan_missing_tab(page)
+        assigned_items = await _scan_todo_tab(page, "Assigned")
+        missing_items = await _scan_todo_tab(page, "Missing")
+        todo_items = assigned_items + missing_items
 
         # Deduplicate + first-pass filter
         seen_urls = set()

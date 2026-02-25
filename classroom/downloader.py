@@ -12,6 +12,7 @@ from classroom.scanner import Assignment
 logger = logging.getLogger(__name__)
 
 MAX_DOC_ATTACHMENTS_TO_READ = 4
+MAX_AP_ATTACHMENTS_TO_READ = 2
 MAX_EXTRACTED_TEXT_CHARS = 12000
 DOC_REQUEST_TIMEOUT_MS = 20000
 
@@ -31,6 +32,13 @@ def _extract_doc_id(url: str) -> str:
 
 def _is_google_doc_url(url: str) -> bool:
     return "docs.google.com/document/d/" in (url or "")
+
+
+def _is_ap_classroom_url(url: str) -> bool:
+    lowered = (url or "").lower()
+    return "collegeboard.org" in lowered and (
+        "myap" in lowered or "apclassroom" in lowered or "digitalportfolio" in lowered
+    )
 
 
 def _clean_text(text: str) -> str:
@@ -94,6 +102,21 @@ async def _extract_doc_text(page: Page, doc_url: str) -> str:
     return _clean_text(text)
 
 
+async def _extract_web_text(page: Page, url: str) -> str:
+    html = await _request_text(page, url)
+    text = _html_to_text(html) if html else ""
+    if len(text) >= 80:
+        return text
+
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=DOC_REQUEST_TIMEOUT_MS)
+        body_text = await page.evaluate("() => document.body?.innerText || ''")
+    except Exception:
+        return ""
+
+    return _clean_text(body_text)
+
+
 async def download_materials(assignment: Assignment) -> list[Path]:
     if not assignment.attachment_urls:
         return []
@@ -127,5 +150,20 @@ async def download_materials(assignment: Assignment) -> list[Path]:
         )
         saved_files.append(doc_file)
         logger.info("Extracted doc context: %s", doc_file)
+
+    ap_urls = [_strip_query(u) for u in unique_urls if _is_ap_classroom_url(_strip_query(u))]
+    for index, ap_url in enumerate(ap_urls[:MAX_AP_ATTACHMENTS_TO_READ], start=1):
+        text = await _extract_web_text(page, ap_url)
+        if len(text) < 80:
+            logger.info("Could not extract readable text from AP Classroom attachment: %s", ap_url)
+            continue
+
+        ap_file = local_dir / f"ap_context_{index}.txt"
+        ap_file.write_text(
+            f"Source URL: {ap_url}\n\n{text}\n",
+            encoding="utf-8",
+        )
+        saved_files.append(ap_file)
+        logger.info("Extracted AP Classroom context: %s", ap_file)
 
     return saved_files

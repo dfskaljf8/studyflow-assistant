@@ -1,5 +1,6 @@
 import asyncio
 import concurrent.futures
+import json
 import logging
 import os
 import random
@@ -22,10 +23,18 @@ from drafting.llm_drafter import generate_draft
 from google_services.docs_writer import create_draft_doc
 from google_services.sheets_logger import log_assignment
 from google_services.email_sender import send_daily_summary
+from browser.ap_session import close_ap_browser
 from browser.session import close_browser
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
+
+SUCCESS_DELIVERY_METHODS = {
+    "classroom_fields_filled",
+    "doc_edited",
+    "doc_copy_attached",
+    "ap_classroom_fields_filled",
+}
 
 _async_loop: asyncio.AbstractEventLoop | None = None
 _async_loop_thread: threading.Thread | None = None
@@ -38,6 +47,7 @@ class WorkflowState(TypedDict):
     style_examples: list[str]
     processed: list[dict]
     errors: list[str]
+    assignment_state: dict
 
 
 def _looks_like_url_list(text: str) -> bool:
@@ -46,6 +56,106 @@ def _looks_like_url_list(text: str) -> bool:
         return True
     url_lines = sum(1 for line in lines if line.startswith("http://") or line.startswith("https://"))
     return (url_lines / len(lines)) >= 0.8
+
+
+def _strip_query(url: str) -> str:
+    return (url or "").split("?", 1)[0].split("#", 1)[0]
+
+
+def _assignment_key(assignment: Assignment) -> str:
+    if assignment.class_id and assignment.assignment_id:
+        return f"{assignment.class_id}:{assignment.assignment_id}"
+    if assignment.assignment_id:
+        return assignment.assignment_id
+    if assignment.assignment_url:
+        return _strip_query(assignment.assignment_url)
+    return f"{assignment.course_name}|{assignment.title}".strip().lower()
+
+
+def _load_assignment_state() -> dict:
+    path = settings.assignment_state_file
+    if not path.exists():
+        return {"bootstrapped": False, "assignments": {}}
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("state root is not an object")
+        assignments = payload.get("assignments", {})
+        if not isinstance(assignments, dict):
+            assignments = {}
+        return {
+            "bootstrapped": bool(payload.get("bootstrapped", False)),
+            "assignments": assignments,
+        }
+    except Exception as exc:
+        logger.warning("Failed to read assignment state file; resetting: %s", exc)
+        return {"bootstrapped": False, "assignments": {}}
+
+
+def _save_assignment_state(state: dict) -> None:
+    path = settings.assignment_state_file
+    safe_state = {
+        "bootstrapped": bool(state.get("bootstrapped", False)),
+        "assignments": state.get("assignments", {}),
+    }
+    path.write_text(json.dumps(safe_state, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _monitor_should_process(assignment: Assignment, state: dict, now_ts: float) -> bool:
+    key = _assignment_key(assignment)
+    assignments = state.get("assignments", {})
+    entry = assignments.get(key)
+    if not isinstance(entry, dict):
+        return True
+
+    status = str(entry.get("status", "")).lower()
+    if status in {"success", "bootstrapped_seen"}:
+        return False
+
+    if status == "failed":
+        retry_after = max(1, settings.schedule_failed_retry_minutes) * 60
+        last_attempt = float(entry.get("last_attempt_ts", 0) or 0)
+        return (now_ts - last_attempt) >= retry_after
+
+    return True
+
+
+def _mark_assignment_state(
+    state: dict,
+    assignment: Assignment,
+    *,
+    status: str,
+    delivery_method: str,
+    delivery_details: str,
+    pasted: bool,
+) -> None:
+    assignments = state.setdefault("assignments", {})
+    key = _assignment_key(assignment)
+    now_ts = time.time()
+    entry = assignments.get(key)
+    if not isinstance(entry, dict):
+        entry = {}
+
+    entry.update(
+        {
+            "course_name": assignment.course_name,
+            "title": assignment.title,
+            "assignment_url": _strip_query(assignment.assignment_url or ""),
+            "status": status,
+            "delivery_method": delivery_method,
+            "delivery_details": delivery_details,
+            "pasted": bool(pasted),
+            "last_attempt_ts": now_ts,
+            "last_seen_ts": now_ts,
+        }
+    )
+
+    if status == "success":
+        entry["last_success_ts"] = now_ts
+
+    assignments[key] = entry
+    _save_assignment_state(state)
 
 
 def _acquire_run_lock() -> tuple[TextIO | None, str]:
@@ -149,7 +259,73 @@ def _run_async(coro, timeout_seconds: float | None = None):
 def scan_node(state: WorkflowState) -> dict:
     logger.info("=== Scanning assignments ===")
     assignments = _run_async(scan_all_assignments())
-    return {"assignments": assignments, "current_index": 0}
+    mode = os.getenv("STUDYFLOW_MODE", "").lower()
+    assignment_state = _load_assignment_state()
+
+    if mode == "schedule":
+        now_ts = time.time()
+        records = assignment_state.setdefault("assignments", {})
+
+        if not assignment_state.get("bootstrapped", False):
+            if settings.schedule_bootstrap_existing_assignments:
+                for assignment in assignments:
+                    key = _assignment_key(assignment)
+                    records[key] = {
+                        "course_name": assignment.course_name,
+                        "title": assignment.title,
+                        "assignment_url": _strip_query(assignment.assignment_url or ""),
+                        "status": "bootstrapped_seen",
+                        "delivery_method": "bootstrap",
+                        "delivery_details": "initial_scheduler_baseline",
+                        "pasted": False,
+                        "last_seen_ts": now_ts,
+                        "last_attempt_ts": 0,
+                    }
+
+                assignment_state["bootstrapped"] = True
+                _save_assignment_state(assignment_state)
+                logger.info(
+                    "Scheduler baseline established with %d existing assignment(s); waiting for new items",
+                    len(assignments),
+                )
+                return {
+                    "assignments": [],
+                    "current_index": 0,
+                    "assignment_state": assignment_state,
+                }
+
+            assignment_state["bootstrapped"] = True
+
+        selected: list[Assignment] = []
+        for assignment in assignments:
+            key = _assignment_key(assignment)
+            entry = records.get(key)
+
+            if _monitor_should_process(assignment, assignment_state, now_ts):
+                selected.append(assignment)
+
+            if not isinstance(entry, dict):
+                entry = {}
+
+            entry.update(
+                {
+                    "course_name": assignment.course_name,
+                    "title": assignment.title,
+                    "assignment_url": _strip_query(assignment.assignment_url or ""),
+                    "last_seen_ts": now_ts,
+                }
+            )
+            records[key] = entry
+
+        _save_assignment_state(assignment_state)
+        logger.info("Monitor scan: %d visible, %d new/retry candidate(s)", len(assignments), len(selected))
+        assignments = selected
+
+    return {
+        "assignments": assignments,
+        "current_index": 0,
+        "assignment_state": assignment_state,
+    }
 
 
 def load_style_node(state: WorkflowState) -> dict:
@@ -170,6 +346,7 @@ def process_assignment_node(state: WorkflowState) -> dict:
 
     processed = list(state.get("processed", []))
     errors = list(state.get("errors", []))
+    assignment_state = dict(state.get("assignment_state") or _load_assignment_state())
 
     try:
         logger.info("  Step 1/5: Collecting attachment links + doc instructions")
@@ -211,7 +388,15 @@ def process_assignment_node(state: WorkflowState) -> dict:
         for attempt in range(1, attempts + 1):
             logger.info("  Step 4/5: Pasting into Classroom (attempt %d/%d)", attempt, attempts)
             try:
-                pasted = _run_async(paste_draft(a, draft), timeout_seconds=attempt_timeout)
+                pasted = _run_async(
+                    paste_draft(
+                        assignment=a,
+                        draft_text=draft,
+                        style_examples=state["style_examples"],
+                        material_texts=material_texts,
+                    ),
+                    timeout_seconds=attempt_timeout,
+                )
                 delivery_method = a.delivery_method or ("delivered" if pasted else "failed")
                 delivery_details = a.delivery_details or ""
             except TimeoutError:
@@ -236,12 +421,23 @@ def process_assignment_node(state: WorkflowState) -> dict:
             logger.warning("  Paste failed after %d attempt(s); local draft was still saved", attempts)
 
         status_map = {
+            "classroom_fields_filled": "Draft filled in Classroom response fields",
             "doc_edited": "Draft added to attached Google Doc",
             "doc_copy_attached": "Draft added to copied Google Doc and attached",
-            "comment_drafted": "Private comment drafted (not posted)",
+            "ap_classroom_fields_filled": "Draft filled in AP Classroom response fields",
             "skipped_mismatch": "Skipped due to assignment mismatch",
         }
         status_text = status_map.get(delivery_method, "Draft Saved (delivery failed)")
+
+        attempt_status = "success" if (pasted or delivery_method in SUCCESS_DELIVERY_METHODS) else "failed"
+        _mark_assignment_state(
+            assignment_state,
+            a,
+            status=attempt_status,
+            delivery_method=delivery_method,
+            delivery_details=delivery_details,
+            pasted=pasted,
+        )
 
         logger.info("  Step 5/5: Logging assignment")
         try:
@@ -277,11 +473,20 @@ def process_assignment_node(state: WorkflowState) -> dict:
         msg = f"Error processing '{a.title}': {exc}"
         logger.exception(msg)
         errors.append(msg)
+        _mark_assignment_state(
+            assignment_state,
+            a,
+            status="failed",
+            delivery_method="exception",
+            delivery_details=str(exc),
+            pasted=False,
+        )
 
     return {
         "current_index": idx + 1,
         "processed": processed,
         "errors": errors,
+        "assignment_state": assignment_state,
     }
 
 
@@ -303,9 +508,13 @@ def delay_node(state: WorkflowState) -> dict:
         logger.info("Skipping delay before final assignment")
         return {}
 
-    if os.getenv("STUDYFLOW_MODE", "").lower() == "run":
+    mode = os.getenv("STUDYFLOW_MODE", "").lower()
+    if mode == "run":
         delay_min = 10.0
         delay_max = 30.0
+    elif mode == "schedule":
+        delay_min = 0.0
+        delay_max = 0.0
     else:
         delay_min = max(0, settings.delay_min_seconds)
         delay_max = max(delay_min, settings.delay_max_seconds)
@@ -323,6 +532,7 @@ def delay_node(state: WorkflowState) -> dict:
 
 def summary_node(state: WorkflowState) -> dict:
     logger.info("=== Sending daily summary ===")
+    mode = os.getenv("STUDYFLOW_MODE", "").lower()
     if settings.send_email_summary:
         try:
             _run_async(
@@ -339,12 +549,19 @@ def summary_node(state: WorkflowState) -> dict:
     else:
         logger.info("Email summary disabled by configuration")
 
-    try:
-        _run_async(close_browser(), timeout_seconds=20)
-    except TimeoutError:
-        logger.warning("Browser close timed out; continuing")
-    except Exception as exc:
-        logger.warning("Failed to close browser cleanly: %s", exc)
+    if mode != "schedule":
+        try:
+            _run_async(close_ap_browser(), timeout_seconds=20)
+        except Exception:
+            pass
+        try:
+            _run_async(close_browser(), timeout_seconds=20)
+        except TimeoutError:
+            logger.warning("Browser close timed out; continuing")
+        except Exception as exc:
+            logger.warning("Failed to close browser cleanly: %s", exc)
+    else:
+        logger.info("Schedule mode: keeping browser session active")
 
     total = len(state["assignments"])
     done = len(state.get("processed", []))
@@ -392,6 +609,7 @@ def run_workflow() -> WorkflowState:
             "style_examples": [],
             "processed": [],
             "errors": [msg],
+            "assignment_state": _load_assignment_state(),
         }
 
     app = build_workflow()
@@ -401,6 +619,7 @@ def run_workflow() -> WorkflowState:
         "style_examples": [],
         "processed": [],
         "errors": [],
+        "assignment_state": _load_assignment_state(),
     }
 
     try:
@@ -409,5 +628,6 @@ def run_workflow() -> WorkflowState:
             return cast(WorkflowState, final_state)
         return initial_state
     finally:
-        _shutdown_async_loop()
+        if os.getenv("STUDYFLOW_MODE", "").lower() != "schedule":
+            _shutdown_async_loop()
         _release_run_lock(lock_file)
