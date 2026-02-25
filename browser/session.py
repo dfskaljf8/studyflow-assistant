@@ -57,12 +57,14 @@ async def get_browser_context() -> BrowserContext:
     _cleanup_stale_browser()
 
     _pw = await async_playwright().start()
+    use_headless = os.environ.get("STUDYFLOW_HEADLESS", "").lower() in ("1", "true", "yes")
     _context = await _pw.chromium.launch_persistent_context(
         user_data_dir=str(settings.browser_data_dir),
-        headless=False,
+        headless=use_headless,
         args=[
             "--disable-blink-features=AutomationControlled",
             "--no-sandbox",
+            "--disable-dev-shm-usage",
         ],
         viewport={"width": 1366, "height": 900},
         locale="en-US",
