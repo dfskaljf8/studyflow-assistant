@@ -1,7 +1,13 @@
 (async () => {
-  const GEMINI_KEY = "%%GEMINI_KEY%%";
-  const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`;
-  const FALLBACK_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemma-3-1b-it:generateContent?key=${GEMINI_KEY}`;
+  const API_KEY = "%%GEMINI_KEY%%";
+  const API_MODE = "%%API_MODE%%"; // "gemini" or "openrouter"
+
+  // Google Gemini direct
+  const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${API_KEY}`;
+  const GEMINI_FALLBACK = `https://generativelanguage.googleapis.com/v1beta/models/gemma-3-1b-it:generateContent?key=${API_KEY}`;
+
+  // OpenRouter (OpenAI-compatible)
+  const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
   const IGNORE_COURSES = [
     "fbla", "deca", "speech & debate", "honor society", "nhs",
@@ -56,9 +62,16 @@
     if (el) el.innerHTML += html + "<br>";
   }
 
-  // --- Gemini API ---
-  async function callGemini(prompt) {
-    for (const url of [GEMINI_URL, FALLBACK_URL]) {
+  // --- LLM API ---
+  async function callLLM(prompt) {
+    if (API_MODE === "openrouter") {
+      return await callOpenRouter(prompt);
+    }
+    return await callGeminiDirect(prompt);
+  }
+
+  async function callGeminiDirect(prompt) {
+    for (const url of [GEMINI_URL, GEMINI_FALLBACK]) {
       try {
         const resp = await fetch(url, {
           method: "POST",
@@ -74,6 +87,35 @@
         if (text && text.trim()) return text.trim();
       } catch (e) {
         log(`Gemini error: ${e.message}`);
+      }
+    }
+    return null;
+  }
+
+  async function callOpenRouter(prompt) {
+    const models = ["google/gemini-2.0-flash-exp:free", "google/gemma-3-1b-it:free"];
+    for (const model of models) {
+      try {
+        const resp = await fetch(OPENROUTER_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${API_KEY}`,
+            "HTTP-Referer": "https://classroom.google.com",
+          },
+          body: JSON.stringify({
+            model: model,
+            messages: [{ role: "user", content: prompt }],
+            temperature: 0.7,
+            max_tokens: 2048
+          })
+        });
+        if (!resp.ok) continue;
+        const data = await resp.json();
+        const text = data?.choices?.[0]?.message?.content;
+        if (text && text.trim()) return text.trim();
+      } catch (e) {
+        log(`OpenRouter error: ${e.message}`);
       }
     }
     return null;
@@ -228,7 +270,7 @@ OUTPUT RULES:
 
 Write the response now. Output ONLY the answer text.`;
 
-    return await callGemini(prompt);
+    return await callLLM(prompt);
   }
 
   // --- Paste into Classroom Question Textarea ---
