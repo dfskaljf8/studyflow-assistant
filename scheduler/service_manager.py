@@ -76,13 +76,10 @@ def _is_service_loaded(service_target: str) -> bool:
 
 
 def _build_plist_payload(info: ServiceInfo) -> dict:
+    wrapper = info.project_root / "scheduler" / "run_awake.sh"
     return {
         "Label": info.label,
-        "ProgramArguments": [
-            str(info.python_path),
-            str(info.project_root / "main.py"),
-            "schedule",
-        ],
+        "ProgramArguments": ["/bin/bash", str(wrapper)],
         "WorkingDirectory": str(info.project_root),
         "RunAtLoad": True,
         "KeepAlive": True,
@@ -92,6 +89,7 @@ def _build_plist_payload(info: ServiceInfo) -> dict:
         "EnvironmentVariables": {
             "PYTHONUNBUFFERED": "1",
             "PYTHONPATH": str(info.project_root),
+            "PATH": "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
         },
     }
 
