@@ -18,3 +18,4 @@ my_past_work/*
 .browser_data/
 ap_session.json
 debug_*.png
+bookmarklet/bookmarklet_url.txt
