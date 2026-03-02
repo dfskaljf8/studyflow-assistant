@@ -107,7 +107,9 @@ def _prepare_draft_for_doc(draft_text: str) -> str:
     text = re.sub(r"<\s*text\s*>", "", text, flags=re.IGNORECASE)
     text = re.sub(r"<\s*answer\s*>", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\[\s*insert[^\]]*\]", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"^\s*\[\s*answer\s*\d*\s*\]\s*", "", text, flags=re.IGNORECASE | re.MULTILINE)
+    text = re.sub(
+        r"^\s*\[\s*answer\s*\d*\s*\]\s*", "", text, flags=re.IGNORECASE | re.MULTILINE
+    )
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
     if len(text) > MAX_DOC_PASTE_CHARS:
         logger.warning(
@@ -195,49 +197,73 @@ async def _read_assignment_heading(page: Page) -> str:
 
 
 async def _verify_assignment_context(page: Page, assignment: Assignment) -> bool:
-    expected_id = assignment.assignment_id or _extract_assignment_id(assignment.assignment_url)
-    current_url = page.url or ""
+    expected_id = assignment.assignment_id or _extract_assignment_id(
+        assignment.assignment_url
+    )
+    current_url = (page.url or "").lower()
+    current_title = ""
+
+    try:
+        current_title = (await _read_assignment_heading(page) or "").lower()
+    except Exception:
+        pass
+
     if expected_id:
-        if f"/a/{expected_id}" in current_url:
+        expected_id_lower = expected_id.lower()
+        if expected_id_lower in current_url:
+            return True
+        if f"/a/{expected_id_lower}" in current_url:
             return True
         logger.warning(
             "Assignment ID mismatch. expected_id=%s, current_url=%s",
             expected_id,
-            current_url,
+            page.url,
         )
-        return False
 
-    heading = await _read_assignment_heading(page)
-    if heading and _titles_match(assignment.title, heading):
-        return True
+    if current_title and assignment.title:
+        title_lower = assignment.title.lower()
+        if _titles_match(assignment.title, current_title):
+            return True
+        if current_title in title_lower or title_lower in current_title:
+            logger.info("Title partial match: '%s' vs '%s'", current_title, title_lower)
+            return True
 
     logger.warning(
         "Assignment context mismatch. expected_id=%s, expected_title=%s, current_url=%s, heading=%s",
         expected_id,
         assignment.title,
-        current_url,
-        heading,
+        page.url,
+        current_title,
     )
     return False
 
 
-async def _open_and_verify_assignment(page: Page, assignment: Assignment, mark_skip_on_fail: bool = True) -> bool:
-    for attempt in range(1, 3):
+async def _open_and_verify_assignment(
+    page: Page, assignment: Assignment, mark_skip_on_fail: bool = True
+) -> bool:
+    for attempt in range(1, 4):
         await _open_assignment_for_paste(page, assignment.assignment_url)
         if await _verify_assignment_context(page, assignment):
             return True
-        if attempt == 1:
-            logger.warning("  Paste: assignment verification failed, retrying navigation once")
-            await asyncio.sleep(1)
+        if attempt < 3:
+            logger.warning(
+                "  Paste: assignment verification failed (attempt %d/3), retrying...",
+                attempt,
+            )
+            await asyncio.sleep(1.5)
 
     if mark_skip_on_fail:
         assignment.delivery_method = "skipped_mismatch"
         assignment.delivery_details = "assignment_verification_failed"
-    logger.warning("Skipping delivery due to persistent assignment mismatch: %s", assignment.title)
+    logger.warning(
+        "Skipping delivery due to persistent assignment mismatch: %s", assignment.title
+    )
     return False
 
 
-async def _find_first_visible(page: Page, selectors: list[str], timeout_ms: int) -> Locator | None:
+async def _find_first_visible(
+    page: Page, selectors: list[str], timeout_ms: int
+) -> Locator | None:
     if not selectors:
         return None
 
@@ -422,8 +448,9 @@ async def _open_google_doc(page: Page, doc_url: str) -> bool:
 
 async def _doc_looks_view_only(page: Page) -> bool:
     try:
-        return bool(await page.evaluate(
-            """
+        return bool(
+            await page.evaluate(
+                """
             () => {
                 const text = (document.body?.innerText || '').toLowerCase();
                 const markers = [
@@ -437,7 +464,8 @@ async def _doc_looks_view_only(page: Page) -> bool:
                 return markers.some(m => text.includes(m));
             }
             """
-        ))
+            )
+        )
     except Exception:
         return False
 
@@ -476,17 +504,27 @@ def _estimate_template_fields(doc_text: str) -> int:
         for ln in doc_text.splitlines()
         if ln.strip().endswith(":") and 2 <= len(ln.strip()) <= 80
     )
-    q_count = len(re.findall(r"\b(question|prompt|response|answer)\b", doc_text, flags=re.IGNORECASE))
+    q_count = len(
+        re.findall(
+            r"\b(question|prompt|response|answer)\b", doc_text, flags=re.IGNORECASE
+        )
+    )
     prompt_like = len(
         [
             ln
             for ln in doc_text.splitlines()
-            if re.search(r"\?|:\s*$|_{3,}|\[\s*\]", ln.strip()) and 4 <= len(ln.strip()) <= 180
+            if re.search(r"\?|:\s*$|_{3,}|\[\s*\]", ln.strip())
+            and 4 <= len(ln.strip()) <= 180
         ]
     )
     return min(
         TEMPLATE_MAX_FIELDS,
-        max(marker_count, min(labeled_lines, TEMPLATE_MAX_FIELDS), min(q_count, TEMPLATE_MAX_FIELDS), min(prompt_like, TEMPLATE_MAX_FIELDS)),
+        max(
+            marker_count,
+            min(labeled_lines, TEMPLATE_MAX_FIELDS),
+            min(q_count, TEMPLATE_MAX_FIELDS),
+            min(prompt_like, TEMPLATE_MAX_FIELDS),
+        ),
     )
 
 
@@ -497,7 +535,12 @@ def _is_prompt_candidate(line: str) -> bool:
         return False
 
     lower = line.lower()
-    keyword_prompt = bool(re.search(r"\b(what|why|how|describe|explain|choose|list|write|source type|brief summary|your thoughts|free response|entry\s*#|title, author|topic)\b", lower))
+    keyword_prompt = bool(
+        re.search(
+            r"\b(what|why|how|describe|explain|choose|list|write|source type|brief summary|your thoughts|free response|entry\s*#|title, author|topic)\b",
+            lower,
+        )
+    )
     if keyword_prompt and len(line.split()) <= 26:
         return True
 
@@ -549,8 +592,10 @@ def _extract_fillable_prompts(doc_text: str) -> list[str]:
 
     fillable: list[str] = []
     for i, (idx, prompt) in enumerate(prompt_entries):
-        next_idx = prompt_entries[i + 1][0] if i + 1 < len(prompt_entries) else len(raw_lines)
-        segment = [ln for ln in raw_lines[idx + 1:next_idx] if ln]
+        next_idx = (
+            prompt_entries[i + 1][0] if i + 1 < len(prompt_entries) else len(raw_lines)
+        )
+        segment = [ln for ln in raw_lines[idx + 1 : next_idx] if ln]
 
         if not segment:
             fillable.append(prompt)
@@ -607,7 +652,9 @@ def _looks_like_template(doc_text: str) -> bool:
 def _strip_answer_label(text: str) -> str:
     out = text.strip()
     out = re.sub(r"^\s*\[\s*answer\s*\d*\s*\]\s*", "", out, flags=re.IGNORECASE)
-    out = re.sub(r"^\s*(?:answer|response)\s*\d*\s*[:.-]\s*", "", out, flags=re.IGNORECASE)
+    out = re.sub(
+        r"^\s*(?:answer|response)\s*\d*\s*[:.-]\s*", "", out, flags=re.IGNORECASE
+    )
     return out.strip()
 
 
@@ -620,7 +667,11 @@ def _split_template_answers(text: str, max_fields: int) -> list[str]:
         pieces: list[str] = []
         for i, match in enumerate(marker_matches):
             start = match.end()
-            end = marker_matches[i + 1].start() if i + 1 < len(marker_matches) else len(text)
+            end = (
+                marker_matches[i + 1].start()
+                if i + 1 < len(marker_matches)
+                else len(text)
+            )
             chunk = _strip_answer_label(text[start:end])
             if chunk:
                 pieces.append(chunk)
@@ -629,7 +680,9 @@ def _split_template_answers(text: str, max_fields: int) -> list[str]:
         else:
             blocks = [text.strip()]
     else:
-        blocks = [chunk.strip() for chunk in re.split(r"\n\s*\n+", text) if chunk.strip()]
+        blocks = [
+            chunk.strip() for chunk in re.split(r"\n\s*\n+", text) if chunk.strip()
+        ]
 
     if len(blocks) <= 1 and max_fields > 1:
         blocks = [
@@ -645,7 +698,7 @@ def _split_template_answers(text: str, max_fields: int) -> list[str]:
 
     if max_fields > 0 and len(blocks) > max_fields:
         kept = blocks[: max_fields - 1]
-        kept.append("\n\n".join(blocks[max_fields - 1:]))
+        kept.append("\n\n".join(blocks[max_fields - 1 :]))
         return kept
 
     return blocks
@@ -667,7 +720,9 @@ async def _human_type_text(page: Page, text: str) -> None:
             if len(buffer) >= burst_size:
                 await page.keyboard.type(
                     "".join(buffer),
-                    delay=random.randint(HUMAN_TYPING_MIN_DELAY_MS, HUMAN_TYPING_MAX_DELAY_MS),
+                    delay=random.randint(
+                        HUMAN_TYPING_MIN_DELAY_MS, HUMAN_TYPING_MAX_DELAY_MS
+                    ),
                 )
                 buffer.clear()
                 burst_size = random.randint(2, 6)
@@ -678,7 +733,9 @@ async def _human_type_text(page: Page, text: str) -> None:
         if buffer:
             await page.keyboard.type(
                 "".join(buffer),
-                delay=random.randint(HUMAN_TYPING_MIN_DELAY_MS, HUMAN_TYPING_MAX_DELAY_MS),
+                delay=random.randint(
+                    HUMAN_TYPING_MIN_DELAY_MS, HUMAN_TYPING_MAX_DELAY_MS
+                ),
             )
 
         if line_idx < len(lines) - 1:
@@ -747,7 +804,15 @@ async def _jump_to_marker(page: Page, marker: str) -> bool:
 
 
 async def _focus_first_template_field(page: Page) -> None:
-    for marker in ["___", "[ ]", "answer", "response", "claim", "reasoning", "type here"]:
+    for marker in [
+        "___",
+        "[ ]",
+        "answer",
+        "response",
+        "claim",
+        "reasoning",
+        "type here",
+    ]:
         if await _jump_to_marker(page, marker):
             return
 
@@ -757,7 +822,9 @@ async def _focus_first_template_field(page: Page) -> None:
 @dataclass
 class _DocTableInfo:
     is_table: bool = False
-    layout: str = ""  # "side" = answer box beside prompt, "below" = answer box under prompt
+    layout: str = (
+        ""  # "side" = answer box beside prompt, "below" = answer box under prompt
+    )
 
 
 async def _detect_doc_table_layout(page: Page, doc_id: str) -> _DocTableInfo:
@@ -774,6 +841,7 @@ async def _detect_doc_table_layout(page: Page, doc_id: str) -> _DocTableInfo:
         html = await resp.text()
         await resp.dispose()
         import re as _re
+
         tables = _re.findall(r"<table[^>]*>.*?</table>", html, _re.DOTALL)
         if not tables:
             return result
@@ -801,9 +869,15 @@ async def _detect_doc_table_layout(page: Page, doc_id: str) -> _DocTableInfo:
             below_pairs = 0
             for i in range(len(rows) - 1):
                 cells_this = _re.findall(r"<td[^>]*>(.*?)</td>", rows[i], _re.DOTALL)
-                cells_next = _re.findall(r"<td[^>]*>(.*?)</td>", rows[i + 1], _re.DOTALL)
-                this_text = " ".join(_re.sub(r"<[^>]+>", "", c).strip() for c in cells_this)
-                next_text = " ".join(_re.sub(r"<[^>]+>", "", c).strip() for c in cells_next)
+                cells_next = _re.findall(
+                    r"<td[^>]*>(.*?)</td>", rows[i + 1], _re.DOTALL
+                )
+                this_text = " ".join(
+                    _re.sub(r"<[^>]+>", "", c).strip() for c in cells_this
+                )
+                next_text = " ".join(
+                    _re.sub(r"<[^>]+>", "", c).strip() for c in cells_next
+                )
                 if this_text and not next_text:
                     below_pairs += 1
             if below_pairs >= 2:
@@ -1048,7 +1122,9 @@ async def _fill_template_fields(
     doc_id = _extract_doc_id(doc_url)
     table_info = await _detect_doc_table_layout(page, doc_id)
 
-    attachment_summary = summarize_attachment_context(assignment.attachment_urls, material_texts)
+    attachment_summary = summarize_attachment_context(
+        assignment.attachment_urls, material_texts
+    )
     answers = generate_structured_answers(
         assignment=assignment,
         style_examples=style_examples,
@@ -1059,7 +1135,10 @@ async def _fill_template_fields(
 
     logger.info(
         "  Paste: filling template (%d prompts, %d answers, table=%s/%s)",
-        len(prompts), len(answers), table_info.is_table, table_info.layout,
+        len(prompts),
+        len(answers),
+        table_info.is_table,
+        table_info.layout,
     )
 
     # Go to doc start before filling
@@ -1074,7 +1153,9 @@ async def _fill_template_fields(
         if not a:
             continue
 
-        logger.info("  Paste: placing answer %d/%d (type=%s)", i + 1, len(answers), q_type)
+        logger.info(
+            "  Paste: placing answer %d/%d (type=%s)", i + 1, len(answers), q_type
+        )
         success = await _place_answer_by_type(page, q, a, q_type, table_info)
         if success:
             filled_count += 1
@@ -1124,9 +1205,13 @@ async def _paste_into_google_doc(
             # Extract student name from the assignment or use "Kushal Surepalli" as fallback
             student_name = "Kushal Surepalli"
             if _student_data_already_present(doc_snapshot, student_name):
-                logger.info("  Paste: shared class table doc already contains student data, skipping")
+                logger.info(
+                    "  Paste: shared class table doc already contains student data, skipping"
+                )
                 return False
-            logger.info("  Paste: shared class table doc detected but student data missing; appending to end")
+            logger.info(
+                "  Paste: shared class table doc detected but student data missing; appending to end"
+            )
             await _go_to_doc_end(page)
             await asyncio.sleep(0.3)
             await page.keyboard.press("Enter")
@@ -1197,7 +1282,9 @@ async def _make_doc_copy(page: Page, source_doc_url: str, assignment_title: str)
     )
     if name_input:
         try:
-            await fill_with_retry(name_input, f"{assignment_title} - StudyFlow", timeout_ms=5000)
+            await fill_with_retry(
+                name_input, f"{assignment_title} - StudyFlow", timeout_ms=5000
+            )
         except Exception:
             pass
 
@@ -1239,7 +1326,9 @@ async def _make_doc_copy(page: Page, source_doc_url: str, assignment_title: str)
     return ""
 
 
-async def _attach_doc_link_to_assignment(page: Page, assignment: Assignment, doc_url: str) -> bool:
+async def _attach_doc_link_to_assignment(
+    page: Page, assignment: Assignment, doc_url: str
+) -> bool:
     logger.info("  Paste: attaching copied Google Doc in assignment")
     if not await _open_and_verify_assignment(page, assignment, mark_skip_on_fail=False):
         return False
@@ -1345,14 +1434,18 @@ async def _attach_doc_link_to_assignment(page: Page, assignment: Assignment, doc
 
 
 def _title_overlap_score(assignment_title: str, doc_snapshot: str) -> int:
-    title_tokens = {tok for tok in _normalize_text(assignment_title).split() if len(tok) > 3}
+    title_tokens = {
+        tok for tok in _normalize_text(assignment_title).split() if len(tok) > 3
+    }
     if not title_tokens:
         return 0
     snapshot_tokens = set(_normalize_text(doc_snapshot[:6000]).split())
     return len(title_tokens & snapshot_tokens)
 
 
-async def _rank_doc_candidates(page: Page, assignment: Assignment, doc_links: list[str]) -> list[str]:
+async def _rank_doc_candidates(
+    page: Page, assignment: Assignment, doc_links: list[str]
+) -> list[str]:
     scored: list[tuple[int, str]] = []
     for doc_url in doc_links:
         if not await _open_google_doc(page, doc_url):
@@ -1388,7 +1481,9 @@ async def _deliver_via_google_doc(
         ordered_links = doc_links
 
     for idx, doc_url in enumerate(ordered_links, start=1):
-        logger.info("  Paste: trying ranked attached Doc %d/%d", idx, len(ordered_links))
+        logger.info(
+            "  Paste: trying ranked attached Doc %d/%d", idx, len(ordered_links)
+        )
         if not await _open_google_doc(page, doc_url):
             continue
 
@@ -1402,14 +1497,20 @@ async def _deliver_via_google_doc(
         ):
             assignment.delivery_method = "doc_edited"
             assignment.delivery_details = _strip_query(doc_url)
-            logger.info("Draft pasted into attached Google Doc for: %s", assignment.title)
+            logger.info(
+                "Draft pasted into attached Google Doc for: %s", assignment.title
+            )
             return True
 
         if not view_only:
-            logger.warning("  Paste: attached doc is editable but template fill failed; not creating a new doc")
+            logger.warning(
+                "  Paste: attached doc is editable but template fill failed; not creating a new doc"
+            )
             continue
 
-        logger.info("  Paste: attached doc appears view-only; trying copy + attach fallback")
+        logger.info(
+            "  Paste: attached doc appears view-only; trying copy + attach fallback"
+        )
 
         copied_doc_url = await _make_doc_copy(page, doc_url, assignment.title)
         if not copied_doc_url:
@@ -1427,14 +1528,20 @@ async def _deliver_via_google_doc(
         ):
             continue
 
-        attached = await _attach_doc_link_to_assignment(page, assignment, copied_doc_url)
+        attached = await _attach_doc_link_to_assignment(
+            page, assignment, copied_doc_url
+        )
         if not attached:
-            logger.warning("  Paste: copied Google Doc was filled, but attachment step failed")
+            logger.warning(
+                "  Paste: copied Google Doc was filled, but attachment step failed"
+            )
             continue
 
         assignment.delivery_method = "doc_copy_attached"
         assignment.delivery_details = copied_doc_url
-        logger.info("Draft pasted into copied Google Doc and attached for: %s", assignment.title)
+        logger.info(
+            "Draft pasted into copied Google Doc and attached for: %s", assignment.title
+        )
         return True
 
     return False
@@ -1451,10 +1558,15 @@ async def _deliver_via_ap_classroom(
         return False
 
     if not ap_session_exists():
-        logger.warning("  Paste: AP session not set up yet. Run: python main.py ap-login")
+        logger.warning(
+            "  Paste: AP session not set up yet. Run: python main.py ap-login"
+        )
         return False
 
-    logger.info("  Paste: found %d AP Classroom link(s), using dedicated AP session", len(ap_links))
+    logger.info(
+        "  Paste: found %d AP Classroom link(s), using dedicated AP session",
+        len(ap_links),
+    )
 
     try:
         ap_page = await get_ap_page()
@@ -1467,7 +1579,9 @@ async def _deliver_via_ap_classroom(
         try:
             await goto_with_retry(ap_page, ap_url, wait_until="domcontentloaded")
         except Exception as exc:
-            logger.warning("  Paste: failed to open AP Classroom link %s: %s", ap_url, exc)
+            logger.warning(
+                "  Paste: failed to open AP Classroom link %s: %s", ap_url, exc
+            )
             continue
 
         try:
@@ -1496,7 +1610,11 @@ async def _deliver_via_ap_classroom(
         except Exception:
             pass
 
-        question_snippets = [q.snippet for q in questions] if questions else [f.nearby_text for f in detected]
+        question_snippets = (
+            [q.snippet for q in questions]
+            if questions
+            else [f.nearby_text for f in detected]
+        )
         attachment_summary = summarize_attachment_context(
             assignment.attachment_urls + [ap_url],
             material_texts,
@@ -1511,7 +1629,9 @@ async def _deliver_via_ap_classroom(
 
         debug_dir = str(settings.project_root)
         try:
-            result: SmartFillResult = await smart_fill_fields(ap_page, answers, debug_dir=debug_dir)
+            result: SmartFillResult = await smart_fill_fields(
+                ap_page, answers, debug_dir=debug_dir
+            )
         except Exception as exc:
             logger.warning("  Paste: AP smart_fill_fields failed: %s", exc)
             continue
@@ -1521,7 +1641,11 @@ async def _deliver_via_ap_classroom(
 
         assignment.delivery_method = "ap_classroom_fields_filled"
         assignment.delivery_details = f"{_strip_query(ap_url)} | fields_filled={result.filled_count}/{result.total_fields}"
-        logger.info("SmartFill: filled %d AP Classroom field(s) for: %s", result.filled_count, assignment.title)
+        logger.info(
+            "SmartFill: filled %d AP Classroom field(s) for: %s",
+            result.filled_count,
+            assignment.title,
+        )
         return True
 
     return False
@@ -1549,8 +1673,14 @@ async def _deliver_via_assignment_fields(
     except Exception:
         pass
 
-    question_snippets = [q.snippet for q in questions] if questions else [f.nearby_text for f in detected]
-    attachment_summary = summarize_attachment_context(assignment.attachment_urls, material_texts)
+    question_snippets = (
+        [q.snippet for q in questions]
+        if questions
+        else [f.nearby_text for f in detected]
+    )
+    attachment_summary = summarize_attachment_context(
+        assignment.attachment_urls, material_texts
+    )
     answers = generate_structured_answers(
         assignment=assignment,
         style_examples=style_examples,
@@ -1561,25 +1691,34 @@ async def _deliver_via_assignment_fields(
 
     logger.info(
         "  Paste: SmartFill flow — %d field(s), %d question(s), %d answer(s)",
-        len(detected), len(question_snippets), len(answers),
+        len(detected),
+        len(question_snippets),
+        len(answers),
     )
 
     debug_dir = str(settings.project_root)
     try:
-        result: SmartFillResult = await smart_fill_fields(page, answers, debug_dir=debug_dir)
+        result: SmartFillResult = await smart_fill_fields(
+            page, answers, debug_dir=debug_dir
+        )
     except Exception as exc:
         logger.warning("  Paste: smart_fill_fields failed: %s", exc)
         return False
 
     if result.filled_count <= 0:
-        logger.warning("  Paste: SmartFill filled 0 fields (fallback=%s)", result.fallback_used)
+        logger.warning(
+            "  Paste: SmartFill filled 0 fields (fallback=%s)", result.fallback_used
+        )
         return False
 
     assignment.delivery_method = "classroom_fields_filled"
     assignment.delivery_details = f"fields_filled={result.filled_count}/{result.total_fields} fallback={result.fallback_used}"
     logger.info(
         "SmartFill: filled %d/%d Classroom field(s) for: %s (fallback=%s)",
-        result.filled_count, result.total_fields, assignment.title, result.fallback_used,
+        result.filled_count,
+        result.total_fields,
+        assignment.title,
+        result.fallback_used,
     )
     return True
 
@@ -1609,7 +1748,9 @@ async def paste_draft(
 
     try:
         logger.info("  Paste: opening assignment page")
-        if not await _open_and_verify_assignment(page, assignment, mark_skip_on_fail=True):
+        if not await _open_and_verify_assignment(
+            page, assignment, mark_skip_on_fail=True
+        ):
             return False
 
         try:

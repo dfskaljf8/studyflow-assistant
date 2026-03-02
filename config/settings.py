@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     summary_email_timeout_seconds: int = 90
 
     send_email_summary: bool = False
-    paste_retry_attempts: int = 2
+    paste_retry_attempts: int = 3
     paste_attempt_timeout_seconds: int = 300
 
     # Comma-separated keywords — courses matching any of these are skipped

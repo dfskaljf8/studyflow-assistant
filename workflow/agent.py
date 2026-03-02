@@ -54,7 +54,9 @@ def _looks_like_url_list(text: str) -> bool:
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     if not lines:
         return True
-    url_lines = sum(1 for line in lines if line.startswith("http://") or line.startswith("https://"))
+    url_lines = sum(
+        1 for line in lines if line.startswith("http://") or line.startswith("https://")
+    )
     return (url_lines / len(lines)) >= 0.8
 
 
@@ -110,8 +112,11 @@ def _monitor_should_process(assignment: Assignment, state: dict, now_ts: float) 
         return True
 
     status = str(entry.get("status", "")).lower()
-    if status in {"success", "bootstrapped_seen"}:
+    if status == "success":
         return False
+
+    if status == "bootstrapped_seen":
+        return True
 
     if status == "failed":
         retry_after = max(1, settings.schedule_failed_retry_minutes) * 60
@@ -318,7 +323,11 @@ def scan_node(state: WorkflowState) -> dict:
             records[key] = entry
 
         _save_assignment_state(assignment_state)
-        logger.info("Monitor scan: %d visible, %d new/retry candidate(s)", len(assignments), len(selected))
+        logger.info(
+            "Monitor scan: %d visible, %d new/retry candidate(s)",
+            len(assignments),
+            len(selected),
+        )
         assignments = selected
 
     return {
@@ -354,7 +363,9 @@ def process_assignment_node(state: WorkflowState) -> dict:
         try:
             downloaded = _run_async(download_materials(a), timeout_seconds=75)
         except TimeoutError:
-            logger.warning("  Attachment collection timed out; continuing without materials")
+            logger.warning(
+                "  Attachment collection timed out; continuing without materials"
+            )
         except Exception as exc:
             logger.warning("  Attachment collection skipped: %s", exc)
 
@@ -386,7 +397,9 @@ def process_assignment_node(state: WorkflowState) -> dict:
         attempt_timeout = max(15, settings.paste_attempt_timeout_seconds)
 
         for attempt in range(1, attempts + 1):
-            logger.info("  Step 4/5: Pasting into Classroom (attempt %d/%d)", attempt, attempts)
+            logger.info(
+                "  Step 4/5: Pasting into Classroom (attempt %d/%d)", attempt, attempts
+            )
             try:
                 pasted = _run_async(
                     paste_draft(
@@ -397,10 +410,14 @@ def process_assignment_node(state: WorkflowState) -> dict:
                     ),
                     timeout_seconds=attempt_timeout,
                 )
-                delivery_method = a.delivery_method or ("delivered" if pasted else "failed")
+                delivery_method = a.delivery_method or (
+                    "delivered" if pasted else "failed"
+                )
                 delivery_details = a.delivery_details or ""
             except TimeoutError:
-                logger.warning("  Paste attempt %d timed out after %ds", attempt, attempt_timeout)
+                logger.warning(
+                    "  Paste attempt %d timed out after %ds", attempt, attempt_timeout
+                )
                 pasted = False
                 delivery_method = "failed"
                 delivery_details = "timeout"
@@ -418,7 +435,10 @@ def process_assignment_node(state: WorkflowState) -> dict:
                 time.sleep(1)
 
         if not pasted:
-            logger.warning("  Paste failed after %d attempt(s); local draft was still saved", attempts)
+            logger.warning(
+                "  Paste failed after %d attempt(s); local draft was still saved",
+                attempts,
+            )
 
         status_map = {
             "classroom_fields_filled": "Draft filled in Classroom response fields",
@@ -429,7 +449,11 @@ def process_assignment_node(state: WorkflowState) -> dict:
         }
         status_text = status_map.get(delivery_method, "Draft Saved (delivery failed)")
 
-        attempt_status = "success" if (pasted or delivery_method in SUCCESS_DELIVERY_METHODS) else "failed"
+        attempt_status = (
+            "success"
+            if (pasted or delivery_method in SUCCESS_DELIVERY_METHODS)
+            else "failed"
+        )
         _mark_assignment_state(
             assignment_state,
             a,
@@ -456,16 +480,18 @@ def process_assignment_node(state: WorkflowState) -> dict:
         except Exception:
             logger.exception("  Failed to log assignment")
 
-        processed.append({
-            "course_name": a.course_name,
-            "title": a.title,
-            "due_date_str": a.due_date_str or "No due date",
-            "draft_link": doc_link,
-            "assignment_link": a.assignment_url,
-            "pasted": pasted,
-            "delivery_method": delivery_method,
-            "delivery_details": delivery_details,
-        })
+        processed.append(
+            {
+                "course_name": a.course_name,
+                "title": a.title,
+                "due_date_str": a.due_date_str or "No due date",
+                "draft_link": doc_link,
+                "assignment_link": a.assignment_url,
+                "pasted": pasted,
+                "delivery_method": delivery_method,
+                "delivery_details": delivery_details,
+            }
+        )
 
         logger.info("Completed: %s", a.title)
 
