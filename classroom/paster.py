@@ -783,6 +783,7 @@ async def _go_to_doc_end(page: Page) -> None:
 
 
 async def _jump_to_marker(page: Page, marker: str) -> bool:
+    """Use Find to locate marker text in document, then navigate to type below it."""
     try:
         await page.keyboard.press(f"{MOD_KEY}+f")
     except Exception:
@@ -795,9 +796,80 @@ async def _jump_to_marker(page: Page, marker: str) -> bool:
         await page.keyboard.type(marker, delay=25)
         await asyncio.sleep(0.15)
         await page.keyboard.press("Enter")
+        await asyncio.sleep(0.25)
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.1)
+        return True
+    except Exception:
+        return False
+
+
+async def _jump_to_question_number(page: Page, question_num: int) -> bool:
+    """Find a numbered question (e.g., '1.', '1)', '2.', '2)') and position cursor at the answer area below it."""
+    markers_to_try = [f"{question_num}.", f"{question_num})", f"{question_num}."]
+
+    for marker in markers_to_try:
+        try:
+            await page.keyboard.press(f"{MOD_KEY}+f")
+        except Exception:
+            continue
+
+        await asyncio.sleep(0.25)
+        try:
+            await page.keyboard.press(f"{MOD_KEY}+A")
+            await asyncio.sleep(0.08)
+            await page.keyboard.type(marker, delay=20)
+            await asyncio.sleep(0.2)
+            await page.keyboard.press("Enter")
+            await asyncio.sleep(0.25)
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.15)
+            return True
+        except Exception:
+            continue
+    return False
+
+    await asyncio.sleep(0.2)
+    try:
+        await page.keyboard.press(f"{MOD_KEY}+A")
+        await asyncio.sleep(0.06)
+        await page.keyboard.type(marker, delay=25)
+        await asyncio.sleep(0.15)
+        await page.keyboard.press("Enter")
         await asyncio.sleep(0.2)
         await page.keyboard.press("Escape")
+        await asyncio.sleep(0.15)
+        await page.keyboard.press("ArrowRight")
+        await asyncio.sleep(0.1)
+        return True
+    except Exception:
+        return False
+
+
+async def _jump_to_question_number(page: Page, question_num: int) -> bool:
+    """Find a numbered question (e.g., '1.', '2.') and position cursor at the answer area below it."""
+    marker = f"{question_num}."
+    try:
+        await page.keyboard.press(f"{MOD_KEY}+f")
+    except Exception:
+        return False
+
+    await asyncio.sleep(0.25)
+    try:
+        await page.keyboard.press(f"{MOD_KEY}+A")
+        await asyncio.sleep(0.08)
+        await page.keyboard.type(marker, delay=20)
         await asyncio.sleep(0.2)
+        await page.keyboard.press("Enter")
+        await asyncio.sleep(0.25)
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.15)
+        await page.keyboard.press("ArrowRight")
+        await asyncio.sleep(0.1)
+        await page.keyboard.press("ArrowDown")
+        await asyncio.sleep(0.1)
+        await page.keyboard.press("Home")
+        await asyncio.sleep(0.1)
         return True
     except Exception:
         return False
@@ -963,21 +1035,23 @@ async def _type_answer_under_prompt(page: Page, prompt: str, answer: str) -> boo
 
     try:
         await page.keyboard.press("Escape")
-        await asyncio.sleep(0.15)
+        await asyncio.sleep(0.1)
     except Exception:
         pass
 
-    # Move to end of prompt line, then down to the answer area
     await page.keyboard.press("End")
     await asyncio.sleep(0.08)
     await page.keyboard.press("ArrowDown")
-    await asyncio.sleep(0.08)
-    # Go to start of the answer line so we type at the beginning
+    await asyncio.sleep(0.1)
     await page.keyboard.press("Home")
     await asyncio.sleep(0.08)
+    await page.keyboard.press("Enter")
+    await asyncio.sleep(0.1)
 
     await _human_type_text(page, answer)
-    await asyncio.sleep(0.35)
+    await asyncio.sleep(0.2)
+    await page.keyboard.press("Space")
+    await asyncio.sleep(0.1)
     return True
 
 
@@ -1041,49 +1115,24 @@ async def _fill_blank_on_line(page: Page, prompt: str, answer: str) -> bool:
 
 
 async def _highlight_mc_answer(page: Page, prompt: str, answer: str) -> bool:
-    """For multiple choice: find the correct answer choice text and highlight it."""
-    # Extract just the choice text (e.g. "C) Honesty" -> "Honesty", or keep "C) Honesty")
-    choice_text = answer.strip()
-    if not choice_text:
-        return False
+    """For multiple choice: find the question, then type the answer in the space below it."""
+    num_match = re.match(r"^(\d+)", prompt.strip())
+    if not num_match:
+        num_match = re.match(r"^(\d+)", answer.strip())
 
-    found = await _jump_to_marker(page, choice_text)
-    if not found:
-        # Try with just the answer part after the letter
-        parts = re.match(r"^[A-D]\)\s*(.+)", choice_text)
-        if parts:
-            found = await _jump_to_marker(page, parts.group(1).strip())
+    question_num = 1
+    if num_match:
+        question_num = int(num_match.group(1))
 
+    found = await _jump_to_question_number(page, question_num)
     if not found:
         return False
 
-    try:
-        await page.keyboard.press("Escape")
-        await asyncio.sleep(0.15)
-    except Exception:
-        pass
-
-    # Select the choice text: Home to start of match area, then Shift+End
-    # Actually use Find to select: re-open find, the text stays highlighted
-    await page.keyboard.press(f"{MOD_KEY}+f")
+    await _human_type_text(page, answer)
     await asyncio.sleep(0.2)
-    await page.keyboard.press(f"{MOD_KEY}+A")
-    await asyncio.sleep(0.05)
-    await page.keyboard.type(choice_text, delay=20)
-    await asyncio.sleep(0.15)
-    await page.keyboard.press("Enter")
-    await asyncio.sleep(0.2)
-    await page.keyboard.press("Escape")
-    await asyncio.sleep(0.2)
-
-    # Now the found text cursor is at/near the choice. Select the word.
-    # Use Shift+End to select to end, or use double-click approach
-    # Apply highlight via menu: Format > Text > Highlight color
-    # Simpler: use keyboard shortcut - no standard shortcut for highlight
-    # Use the toolbar highlight button or just bold it as a simpler approach
-    # For now, just move on - the text was found. Highlighting requires complex toolbar interaction.
-    # Mark as placed even without highlight - answer is identified
-    logger.info("  Paste: MC answer identified: %s", choice_text)
+    await page.keyboard.press("Space")
+    await asyncio.sleep(0.1)
+    logger.info("  Paste: MC answer typed: %s", answer[:50])
     return True
 
 
