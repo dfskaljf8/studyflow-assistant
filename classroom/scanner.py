@@ -59,7 +59,10 @@ SUBMISSION_TYPE_TYPED = "typed_response"
 SUBMISSION_TYPE_GOOGLE_DOC = "google_doc"
 SUBMISSION_TYPE_FILE_UPLOAD = "file_upload"
 SUBMISSION_TYPE_AP_CLASSROOM = "ap_classroom"
+SUBMISSION_TYPE_AP_CLASSROOM_LINKED = "AP_CLASSROOM_LINKED"
 SUBMISSION_TYPE_UNKNOWN = "unknown"
+
+AP_LINK_PATTERN = r"(collegeboard\.org|myap|apclassroom)"
 
 
 @dataclass
@@ -267,18 +270,24 @@ async def _enrich_assignment(page: Page, assignment: Assignment) -> None:
                 )) attachments.push(l.href);
 
                 // Detect submission type
-                // Priority: AP Classroom > Google Doc > Typed Response > File Upload > Unknown
+                // Priority: AP Classroom LINK > AP on-page > Google Doc > Typed Response > File Upload > Unknown
                 let submissionType = 'unknown';
                 const pageText = (document.body?.innerText || '').toLowerCase();
                 const pageHtml = document.body?.outerHTML || '';
 
-                // Check for AP Classroom links first
-                const hasAPClassroom = attachments.some(a => 
+                // Check for outbound AP Classroom links (distinct from AP questions on-page)
+                const hasAPLink = attachments.some(a => 
                     a.includes('collegeboard.org') || a.includes('myap') || a.includes('apclassroom')
                 );
-                if (hasAPClassroom) {
-                    submissionType = 'ap_classroom';
+                if (hasAPLink) {
+                    // This is an assignment with an outbound link to AP Classroom
+                    submissionType = 'AP_CLASSROOM_LINKED';
                 } else {
+                    // Check for AP Classroom questions ON the page (not links)
+                    const hasAPOnPage = pageText.includes('ap classroom') || 
+                                       pageText.includes('my ap') ||
+                                       pageHtml.includes('collegeboard.org');
+                    
                     // Check for Google Doc attachment (template to edit)
                     // Look for "Attach" button with Google Docs option, or linked doc templates
                     const hasGoogleDocAttach = pageHtml.includes('docs.google.com/document/d/') || 
@@ -298,7 +307,9 @@ async def _enrich_assignment(page: Page, assignment: Assignment) -> None:
                                           pageText.includes('attach file') ||
                                           document.querySelector('input[type="file"]');
 
-                    if (hasGoogleDocAttach) {
+                    if (hasAPOnPage) {
+                        submissionType = 'ap_classroom';
+                    } else if (hasGoogleDocAttach) {
                         submissionType = 'google_doc';
                     } else if (hasTypedResponse) {
                         submissionType = 'typed_response';

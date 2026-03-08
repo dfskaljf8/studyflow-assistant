@@ -22,6 +22,7 @@ from classroom.scanner import (
     SUBMISSION_TYPE_GOOGLE_DOC,
     SUBMISSION_TYPE_FILE_UPLOAD,
     SUBMISSION_TYPE_AP_CLASSROOM,
+    SUBMISSION_TYPE_AP_CLASSROOM_LINKED,
     SUBMISSION_TYPE_UNKNOWN,
 )
 from classroom.submission_handler import (
@@ -1661,6 +1662,315 @@ async def _deliver_via_ap_classroom(
     return False
 
 
+async def _deliver_via_ap_classroom_linked(
+    page: Page,
+    assignment: Assignment,
+    style_examples: list[str],
+    material_texts: list[str],
+) -> bool:
+    """Handle AP Classroom linked assignments using SAME browser session.
+
+    This is triggered when a Google Classroom assignment contains an outbound
+    link to AP Classroom. We navigate to AP using the same page context
+    (not a separate browser context) to maintain session/cookies.
+    """
+    ap_links = await _collect_ap_classroom_links(page, assignment)
+    if not ap_links:
+        logger.info(
+            "  Paste: no AP Classroom links found for AP_CLASSROOM_LINKED assignment"
+        )
+        return False
+
+    logger.info(
+        "  Paste: AP_CLASSROOM_LINKED - found %d AP link(s), navigating in same session",
+        len(ap_links),
+    )
+
+    for idx, ap_url in enumerate(ap_links, start=1):
+        logger.info(
+            "  Paste: opening AP Classroom link %d/%d: %s", idx, len(ap_links), ap_url
+        )
+
+        try:
+            await goto_with_retry(page, ap_url, wait_until="domcontentloaded")
+        except Exception as exc:
+            logger.warning("  Paste: failed to open AP link %s: %s", ap_url, exc)
+            continue
+
+        try:
+            await page.wait_for_load_state("networkidle", timeout=60000)
+        except Exception:
+            pass
+
+        url_now = (page.url or "").lower()
+
+        # Check for login wall
+        if "login" in url_now or "signin" in url_now or "auth" in url_now:
+            logger.warning(
+                "  Paste: AP_AUTH_REQUIRED - login wall detected for: %s",
+                assignment.title,
+            )
+            assignment.delivery_method = "skipped"
+            assignment.delivery_details = "AP_AUTH_REQUIRED"
+            return False
+
+        # Check if we're on an AP page
+        page_text = ""
+        try:
+            page_text = await page.evaluate(
+                "() => (document.body?.innerText || '').slice(0, 500)"
+            )
+        except Exception:
+            pass
+
+        if "login" in page_text.lower() or "sign in" in page_text.lower():
+            if "password" in page_text.lower() or "email" in page_text.lower():
+                logger.warning(
+                    "  Paste: AP_AUTH_REQUIRED - login form detected for: %s",
+                    assignment.title,
+                )
+                assignment.delivery_method = "skipped"
+                assignment.delivery_details = "AP_AUTH_REQUIRED"
+                return False
+
+        # Extract response fields with AP-specific selectors
+        try:
+            detected = await _extract_ap_response_fields(page)
+        except Exception as exc:
+            logger.info("  Paste: AP response field detection unavailable: %s", exc)
+            detected = []
+
+        if not detected:
+            logger.info("  Paste: no fillable AP response fields found on: %s", ap_url)
+            continue
+
+        # Extract questions/prompts from AP page
+        questions = []
+        try:
+            questions = await _extract_ap_questions_from_page(page)
+        except Exception:
+            pass
+
+        question_snippets = (
+            [q.snippet for q in questions]
+            if questions
+            else [f.nearby_text for f in detected]
+        )
+
+        logger.info(
+            "  Paste: AP page detected %d field(s), %d question(s)",
+            len(detected),
+            len(question_snippets),
+        )
+
+        # Generate answers using same pipeline
+        attachment_summary = summarize_attachment_context(
+            assignment.attachment_urls + [ap_url],
+            material_texts,
+        )
+        answers = generate_structured_answers(
+            assignment=assignment,
+            style_examples=style_examples,
+            material_texts=material_texts,
+            question_snippets=question_snippets,
+            attachment_summary=attachment_summary,
+        )
+
+        # Fill AP response fields
+        debug_dir = str(settings.project_root)
+        try:
+            result: SmartFillResult = await smart_fill_fields(
+                page, answers, debug_dir=debug_dir
+            )
+        except Exception as exc:
+            logger.warning("  Paste: AP smart_fill_fields failed: %s", exc)
+            continue
+
+        if result.filled_count <= 0:
+            logger.warning("  Paste: AP smart_fill_fields filled 0 fields")
+            continue
+
+        assignment.delivery_method = "ap_classroom_linked_filled"
+        assignment.delivery_details = f"{_strip_query(ap_url)} | fields_filled={result.filled_count}/{result.total_fields}"
+        logger.info(
+            "SmartFill: filled %d AP Classroom (linked) field(s) for: %s",
+            result.filled_count,
+            assignment.title,
+        )
+        return True
+
+    logger.warning(
+        "  Paste: could not fill any AP Classroom linked assignment: %s",
+        assignment.title,
+    )
+    return False
+
+
+async def _extract_ap_response_fields(page: Page) -> list:
+    """Extract response fields from AP Classroom with AP-specific selectors.
+
+    AP Classroom uses custom DOM - we check for:
+    - Standard editable elements
+    - Rich text editors (.ql-editor)
+    - ContentEditable areas
+    - AP-specific question response containers
+    """
+    ap_selectors = """
+        textarea:not([aria-label*="Search" i]):not([placeholder*="Search" i]),
+        div[contenteditable="true"]:not([aria-hidden="true"]),
+        input[type="text"]:not([aria-label*="Search" i]):not([placeholder*="Search" i]),
+        [role="textbox"]:not([aria-hidden="true"]),
+        .ql-editor,
+        [data-placeholder]:not([aria-hidden="true"]),
+        [contenteditable="true"][role="textbox"],
+        .question-response textarea,
+        .response-field textarea,
+        [class*="response"] textarea,
+        [class*="response"] div[contenteditable="true"],
+        iframe[name*="response"]"""
+
+    try:
+        detected = await _extract_editable_fields_by_selector(page, ap_selectors)
+        return detected
+    except Exception as exc:
+        logger.info("  Paste: AP-specific field extraction failed: %s", exc)
+        return []
+
+
+async def _extract_editable_fields_by_selector(page: Page, selector: str) -> list:
+    """Extract editable fields using a custom selector string."""
+    raw = await page.evaluate(
+        """
+        (selector) => {
+            const clean = (t) => (t || '').replace(/\\s+/g, ' ').trim();
+            const isVisible = (el) => {
+                const r = el.getBoundingClientRect();
+                const s = getComputedStyle(el);
+                if (s.display === 'none' || s.visibility === 'hidden' || Number(s.opacity || 1) === 0) return false;
+                return r.width > 6 && r.height > 6 && r.bottom > 0 && r.right > 0;
+            };
+            const ignore = /(turn in|add class comment|private comment|stream|search|submit)/i;
+            const results = [];
+            try {
+                const nodes = Array.from(document.querySelectorAll(selector));
+                let idx = 0;
+                for (const el of nodes) {
+                    if (!isVisible(el)) continue;
+                    if (el.closest('[aria-hidden="true"]')) continue;
+                    const ariaLabel = clean(el.getAttribute('aria-label'));
+                    const placeholder = clean(el.getAttribute('placeholder'));
+                    const combo = ariaLabel + ' ' + placeholder;
+                    if (ignore.test(combo)) continue;
+
+                    idx += 1;
+                    const id = 'sf-ap-field-' + Date.now() + '-' + idx;
+                    el.setAttribute('data-sf-ap-field-id', id);
+
+                    const rect = el.getBoundingClientRect();
+                    let nearText = ariaLabel || placeholder || '';
+                    if (!nearText) {
+                        const container = el.closest('form, article, section, li, div[role="listitem"], [role="main"]') || el.parentElement;
+                        if (container) {
+                            const cands = container.querySelectorAll('h1,h2,h3,h4,label,p,span,div[role="heading"],legend');
+                            let best = null;
+                            let bestDist = 9999;
+                            for (const c of cands) {
+                                if (c === el || c.contains(el) || el.contains(c)) continue;
+                                const cR = c.getBoundingClientRect();
+                                if (cR.bottom > rect.top + 18) continue;
+                                if (Math.abs(cR.left - rect.left) > 700) continue;
+                                const dist = Math.max(0, rect.top - cR.bottom);
+                                if (dist < bestDist) {
+                                    bestDist = dist;
+                                    best = clean(c.textContent || c.innerText);
+                                }
+                            }
+                            if (best && best.length >= 3 && best.length <= 300) nearText = best;
+                        }
+                    }
+                    results.push({
+                        field_id: id,
+                        tag: (el.tagName || '').toLowerCase(),
+                        role: el.getAttribute('role') || '',
+                        input_type: el.getAttribute('type') || '',
+                        near: nearText || ('AP Field ' + idx),
+                        y: rect.top,
+                    });
+                }
+            } catch(e) { /* selector may have caused error */ }
+            results.sort((a, b) => a.y - b.y);
+            return results;
+        }
+    """,
+        selector,
+    )
+
+    from classroom.submission_handler import DetectedField
+
+    return [
+        DetectedField(
+            index=i,
+            field_id=r["field_id"],
+            tag=r["tag"],
+            role=r.get("role", ""),
+            input_type=r.get("input_type", ""),
+            nearby_text=r.get("near", f"AP Field {i + 1}"),
+        )
+        for i, r in enumerate(raw)
+    ]
+
+
+async def _extract_ap_questions_from_page(page: Page) -> list:
+    """Extract question/prompt text from AP Classroom page."""
+    raw = await page.evaluate("""
+        () => {
+            const clean = (t) => (t || '').replace(/\\s+/g, ' ').trim();
+            const ignore = /(turn in|add class comment|private comment|stream|search|submit|ap classroom|my ap)/i;
+            const qLike = (t) => {
+                if (!t || t.length < 4 || t.length > 500) return false;
+                if (ignore.test(t)) return false;
+                return /\\?|:\\s*$|_{3,}|\\[\\s*\\]|\\(\\s*\\)/.test(t)
+                    || /^\\s*(?:\\d+[.)]|[A-Z][.)]|[-*])\\s+/.test(t)
+                    || /\\b(what|why|how|describe|explain|list|choose|write|brief summary|your (answer|response|thoughts)|free response)\\b/i.test(t);
+            };
+            const seen = new Set();
+            const out = [];
+            
+            // AP-specific selectors for questions
+            const selectors = [
+                '[class*="question"] p',
+                '[class*="question"] h1,h2,h3,h4',
+                '[data-question-id]',
+                '.prompt-text',
+                '.question-text',
+                'h1,h2,h3,h4,label,p,span,div[role="heading"],legend'
+            ];
+            
+            for (const sel of selectors) {
+                const els = document.querySelectorAll(sel);
+                for (const el of els) {
+                    const rect = el.getBoundingClientRect();
+                    const style = getComputedStyle(el);
+                    if (style.display === 'none' || style.visibility === 'hidden') continue;
+                    if (rect.width < 5 || rect.height < 5) continue;
+                    const t = clean(el.textContent || el.innerText);
+                    if (!qLike(t)) continue;
+                    const key = t.toLowerCase().slice(0, 120);
+                    if (seen.has(key)) continue;
+                    seen.add(key);
+                    out.push({ snippet: t.slice(0, 300), y: rect.top });
+                }
+            }
+            out.sort((a, b) => a.y - b.y);
+            return out;
+        }
+    """)
+
+    from classroom.submission_handler import DetectedQuestion
+
+    return [DetectedQuestion(index=i, snippet=r["snippet"]) for i, r in enumerate(raw)]
+
+
 async def _deliver_via_assignment_fields(
     page: Page,
     assignment: Assignment,
@@ -1820,6 +2130,25 @@ async def paste_draft(
                 assignment.delivery_details = "google_doc_delivery_failed"
                 logger.warning("Google Doc delivery failed for: %s", assignment.title)
                 return False
+
+        if submission_type == SUBMISSION_TYPE_AP_CLASSROOM_LINKED:
+            logger.info(
+                "  Paste: handling AP_CLASSROOM_LINKED - same session navigation to AP"
+            )
+            delivered_via_ap_linked = await _deliver_via_ap_classroom_linked(
+                page=page,
+                assignment=assignment,
+                style_examples=style_examples,
+                material_texts=material_texts,
+            )
+            if delivered_via_ap_linked:
+                return True
+            assignment.delivery_method = "failed"
+            assignment.delivery_details = "ap_classroom_linked_delivery_failed"
+            logger.warning(
+                "AP Classroom Linked delivery failed for: %s", assignment.title
+            )
+            return False
 
         if (
             submission_type == SUBMISSION_TYPE_AP_CLASSROOM
