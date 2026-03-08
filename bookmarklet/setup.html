@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html>
+<head><title>StudyFlow Bookmarklet Setup</title></head>
+<body style="font-family:sans-serif;max-width:600px;margin:40px auto;padding:20px;">
+<h2>StudyFlow Bookmarklet Setup</h2>
+<p>Enter your Gemini API key and click Generate.</p>
+
+<input id="key" type="text" placeholder="Paste your Gemini API key here" 
+  style="width:100%;padding:10px;font-size:16px;margin:10px 0;box-sizing:border-box;">
+<button onclick="generate()" style="padding:10px 24px;font-size:16px;cursor:pointer;">Generate Bookmarklet</button>
+
+<div id="output" style="margin-top:20px;display:none;">
+  <h3>Your bookmarklet is ready!</h3>
+  <p><b>Option 1:</b> Drag this link to your bookmarks bar:</p>
+  <p style="background:#eef;padding:16px;border-radius:8px;">
+    <a id="bmlink" href="#" style="font-size:18px;font-weight:bold;color:#1976d2;">StudyFlow</a>
+  </p>
+  <p><b>Option 2:</b> Copy the URL and create a bookmark manually:</p>
+  <textarea id="bmurl" style="width:100%;height:100px;font-size:11px;" readonly></textarea>
+  <button onclick="document.getElementById('bmurl').select();document.execCommand('copy');this.textContent='Copied!'" 
+    style="padding:6px 16px;cursor:pointer;">Copy URL</button>
+</div>
+
+<div style="margin-top:30px;padding:16px;background:#f5f5f5;border-radius:8px;">
+<h3>How to use:</h3>
+<ol>
+<li>Go to Google Classroom To-Do page (Assigned or Missing tab)</li>
+<li>Click the StudyFlow bookmark</li>
+<li>A panel appears with drafts for each assignment</li>
+<li>Click "Copy Draft" then open the assignment to paste</li>
+</ol>
+</div>
+
+<script>
+function generate() {
+  var key = document.getElementById("key").value.trim();
+  if (!key) { alert("Enter your API key first"); return; }
+  
+  var code = buildScript(key);
+  var url = "javascript:" + encodeURIComponent(code);
+  
+  document.getElementById("bmlink").href = url;
+  document.getElementById("bmurl").value = url;
+  document.getElementById("output").style.display = "block";
+  alert("Bookmarklet generated! Drag the blue link to your bookmarks bar, or copy the URL.");
+}
+
+function buildScript(key) {
+  return '(async()=>{' +
+  'const K="' + key + '";' +
+  'const U1="https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key="+K;' +
+  'const U2="https://generativelanguage.googleapis.com/v1beta/models/gemma-3-1b-it:generateContent?key="+K;' +
+  'const IC=["fbla","deca","speech & debate","honor society","nhs","sat prep","sat math","math honor"];' +
+  'const IT=["leq","dbq","mcq","saq","frq"];' +
+  'const APR=/ap\\s*u\\.?s\\.?\\s*hist|apush/i;' +
+  'const STY=["Hope, because it keeps going and is the reason why I continue to do the stuff that I do. Honor because I was born with respect to my duty and my loved ones.","With many of my business endeavours, I often had to choose with being honest with my clients about the progress of the work, and sometimes progress gets delayed, but I would try to remain honest with them about it."];' +
+  'function skip(t,c){var x=(t+" "+c).toLowerCase();if(IC.some(function(i){return x.indexOf(i)>=0}))return true;if(APR.test(x))return true;if(IT.some(function(i){return new RegExp("\\\\b"+i+"\\\\b","i").test(t)}))return true;return false;}' +
+  'function log(m){console.log("[SF] "+m);}' +
+  'function mkPanel(){var p=document.getElementById("sf-panel");if(p)p.remove();p=document.createElement("div");p.id="sf-panel";p.style.cssText="position:fixed;top:10px;right:10px;width:420px;max-height:80vh;overflow-y:auto;background:#1a1a2e;color:#eee;font-family:monospace;font-size:13px;padding:16px;border-radius:12px;z-index:99999;box-shadow:0 4px 24px rgba(0,0,0,0.5);";p.innerHTML="<div style=\\"display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;\\"><b style=\\"font-size:15px;\\">StudyFlow</b><span id=\\"sf-close\\" style=\\"cursor:pointer;font-size:18px;\\">&times;</span></div><div id=\\"sf-status\\" style=\\"color:#0f0;\\">Starting...</div><div id=\\"sf-results\\" style=\\"margin-top:10px;\\"></div>";document.body.appendChild(p);document.getElementById("sf-close").onclick=function(){p.remove();};return p;}' +
+  'function stat(m){var e=document.getElementById("sf-status");if(e)e.textContent=m;log(m);}' +
+  'function addR(h){var e=document.getElementById("sf-results");if(e)e.innerHTML+=h+"<br>";}' +
+  'async function callAPI(prompt){for(var i=0;i<2;i++){var url=i===0?U1:U2;try{var r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{temperature:0.7,maxOutputTokens:2048}})});if(!r.ok)continue;var d=await r.json();var t=d&&d.candidates&&d.candidates[0]&&d.candidates[0].content&&d.candidates[0].content.parts&&d.candidates[0].content.parts[0]&&d.candidates[0].content.parts[0].text;if(t&&t.trim())return t.trim();}catch(e){log("API err: "+e.message);}}return null;}' +
+  'async function draft(a){var p="You are writing a homework response in a student\'s personal voice.\\n\\nCRITICAL RULES:\\n- Match this student\'s writing style: casual, simple punctuation, no semicolons or em dashes\\n- NEVER sound robotic, formal, or AI-generated\\n- Keep wording natural with normal imperfections\\n- Answer accurately and completely\\n- If there are numbered questions, answer each one separately with its number\\n- Put each answer in its RESPECTIVE position\\n- Keep it the right length\\n\\nSTUDENT STYLE EXAMPLES:\\n"+STY.join("\\n\\n")+"\\n\\nASSIGNMENT:\\nTitle: "+a.title+"\\nCourse: "+a.course+"\\nInstructions: "+a.text.substring(0,1500)+"\\n\\nOUTPUT RULES:\\n- If numbered questions, format as 1. answer 2. answer etc.\\n- Plain text only, no markdown, no bold, no headers\\n- No placeholder text\\n\\nWrite the response now. Output ONLY the answer text.";return await callAPI(p);}' +
+  'try{mkPanel();' +
+  'if(!window.location.href.match(/classroom\\.google\\.com/)){stat("ERROR: Go to classroom.google.com first, then click bookmarklet.");return;}' +
+  'if(!window.location.href.match(/not-turned-in|todo/i)){stat("Redirecting to To-Do page...");window.location.href="https://classroom.google.com/u/0/a/not-turned-in/all";return;}' +
+  'await new Promise(function(r){setTimeout(r,3000);});' +
+  'stat("Scanning assignments...");' +
+  'var asns=[];var seen={};' +
+  'var links=document.querySelectorAll("a[href*=\\"/c/\\"][href*=\\"/a/\\"][href*=\\"/details\\"]");' +
+  'for(var li=0;li<links.length;li++){var href=links[li].getAttribute("href")||"";if(seen[href]||href.indexOf("not-turned-in")>=0)continue;seen[href]=1;var card=links[li].closest("li")||links[li].parentElement.parentElement;var txt=(card?card.innerText:links[li].innerText)||"";var lines=txt.split("\\n").filter(function(l){return l.trim().length>3;});var title=lines[0]||"Unknown";var course="";for(var j=0;j<lines.length;j++){if(lines[j].match(/Block|Period|AP\\s/i)){course=lines[j];break;}}var full=href.indexOf("http")===0?href:"https://classroom.google.com"+href;if(!skip(title,course))asns.push({title:title,course:course,url:full,text:txt});}' +
+  'if(asns.length===0){stat("No assignments found.");addR("<span style=\\"color:#ff0;\\">Make sure you are on the Missing or Assigned tab, then click the bookmarklet again.</span>");return;}' +
+  'stat("Found "+asns.length+" assignment(s). Generating drafts...");' +
+  'for(var i=0;i<asns.length;i++){var a=asns[i];stat("["+(i+1)+"/"+asns.length+"] Drafting: "+a.title);addR("<div style=\\"border-bottom:1px solid #333;padding:8px 0;\\"><b style=\\"color:#4fc3f7;\\">"+(i+1)+". "+a.title+"</b><br><span style=\\"color:#888;\\">"+a.course+"</span>");var d=await draft(a);if(d){var esc=d.replace(/"/g,"&quot;").replace(/</g,"&lt;");addR("<div style=\\"background:#0d1117;padding:8px;border-radius:6px;margin:4px 0;white-space:pre-wrap;font-size:12px;max-height:200px;overflow-y:auto;\\">"+d.replace(/</g,"&lt;")+"</div><div style=\\"margin:4px 0;\\"><button onclick=\\"navigator.clipboard.writeText(this.getAttribute(\'data-d\')).then(function(){event.target.textContent=\'Copied!\';});\\" data-d=\\""+esc+"\\" style=\\"background:#1976d2;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:12px;\\">Copy Draft</button> <a href=\\""+a.url+"\\" target=\\"_blank\\" style=\\"color:#4fc3f7;font-size:12px;margin-left:8px;\\">Open Assignment</a></div></div>");log("Draft: "+a.title+" ("+d.length+" chars)");}else{addR("<span style=\\"color:#f44;\\">Draft failed</span></div>");}if(i<asns.length-1)await new Promise(function(r){setTimeout(r,2000);});}' +
+  'stat("Done! "+asns.length+" assignment(s) processed.");' +
+  'addR("<hr style=\\"border-color:#333;\\"><span style=\\"color:#0f0;\\">Click Copy Draft then open the assignment to paste.</span>");' +
+  '}catch(err){stat("Error: "+err.message);log("Fatal: "+err.stack);}' +
+  '})();';
+}
+</script>
+</body>
+</html>

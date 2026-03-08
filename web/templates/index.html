@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>StudyFlow</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,sans-serif;background:#0d1117;color:#e6edf3;min-height:100vh;padding:20px}
+.container{max-width:700px;margin:0 auto}
+h1{font-size:24px;margin-bottom:4px;color:#58a6ff}
+.sub{color:#8b949e;font-size:14px;margin-bottom:20px}
+label{display:block;font-size:13px;color:#8b949e;margin-bottom:4px;margin-top:14px}
+input,textarea{width:100%;padding:10px;background:#161b22;border:1px solid #30363d;border-radius:6px;color:#e6edf3;font-size:14px;font-family:inherit}
+input:focus,textarea:focus{outline:none;border-color:#58a6ff}
+textarea{min-height:150px;resize:vertical}
+button{background:#238636;color:#fff;border:none;padding:12px 24px;border-radius:6px;font-size:15px;cursor:pointer;margin-top:16px;width:100%}
+button:hover{background:#2ea043}
+button:disabled{background:#21262d;color:#484f58;cursor:not-allowed}
+.result{margin-top:20px;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;display:none}
+.result h3{font-size:14px;color:#58a6ff;margin-bottom:8px}
+.draft-text{white-space:pre-wrap;font-size:13px;line-height:1.6;color:#e6edf3;max-height:400px;overflow-y:auto;margin-bottom:12px}
+.copy-btn{background:#1f6feb;width:auto;padding:8px 20px;font-size:13px;display:inline-block}
+.copy-btn:hover{background:#388bfd}
+.error{color:#f85149;margin-top:12px;font-size:13px}
+.spinner{display:none;text-align:center;margin-top:16px;color:#8b949e}
+.spinner::after{content:"Generating draft...";animation:pulse 1.5s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>StudyFlow</h1>
+  <p class="sub">Paste your assignment details below. Get a draft in your writing style.</p>
+
+  <label>Assignment Title</label>
+  <input id="title" placeholder="e.g. REHUGO #6: Security v. Freedom">
+
+  <label>Course</label>
+  <input id="course" placeholder="e.g. AP Lang B.4">
+
+  <label>Instructions / Questions (paste everything from the assignment)</label>
+  <textarea id="instructions" placeholder="Paste the assignment description, questions, or any instructions here..."></textarea>
+
+  <button id="btn" onclick="generate()">Generate Draft</button>
+  <div class="spinner" id="spinner"></div>
+  <div class="error" id="error"></div>
+
+  <div class="result" id="result">
+    <h3>Your Draft:</h3>
+    <div class="draft-text" id="draft"></div>
+    <button class="copy-btn" onclick="copyDraft()">Copy to Clipboard</button>
+  </div>
+</div>
+
+<script>
+async function generate() {
+  var btn = document.getElementById("btn");
+  var spinner = document.getElementById("spinner");
+  var errorEl = document.getElementById("error");
+  var resultEl = document.getElementById("result");
+  var draftEl = document.getElementById("draft");
+
+  var title = document.getElementById("title").value.trim();
+  var course = document.getElementById("course").value.trim();
+  var instructions = document.getElementById("instructions").value.trim();
+
+  if (!instructions) { errorEl.textContent = "Paste the assignment instructions first."; return; }
+
+  btn.disabled = true;
+  spinner.style.display = "block";
+  errorEl.textContent = "";
+  resultEl.style.display = "none";
+
+  try {
+    var resp = await fetch("/generate", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({title: title, course: course, instructions: instructions})
+    });
+    var data = await resp.json();
+    if (data.draft) {
+      draftEl.textContent = data.draft;
+      resultEl.style.display = "block";
+    } else {
+      errorEl.textContent = data.error || "Failed to generate draft.";
+    }
+  } catch(e) {
+    errorEl.textContent = "Network error: " + e.message;
+  }
+
+  btn.disabled = false;
+  spinner.style.display = "none";
+}
+
+function copyDraft() {
+  var text = document.getElementById("draft").textContent;
+  navigator.clipboard.writeText(text).then(function() {
+    var btn = document.querySelector(".copy-btn");
+    btn.textContent = "Copied!";
+    setTimeout(function(){ btn.textContent = "Copy to Clipboard"; }, 2000);
+  });
+}
+</script>
+</body>
+</html>
